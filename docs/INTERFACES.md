@@ -417,6 +417,9 @@ ACTION_KEY: list[str]                            # 反查表
 
 要求：
 
+0. **动作 key 字符串必须驻留/去重**（实测：仅此一项 108 MB → 58.35 MB）。v2 里动作字符串
+   只允许出现在 `action_table` 中一份，行数据只存 `uint16` id；写 v1 兼容格式时也要对
+   `ACTION_KEY` 里的字符串做 `sys.intern`。
 1. `MCCFRTrainer.save(path, strategy_only: bool = False)` 默认写 **v2**；
    `strategy_only=True` 时只写平均策略（部署用，最小体积）。
 2. `MCCFRTrainer.load(path)` 必须同时支持 **v1（旧 plain dict，含 `repr` 字符串 key）与 v2**，
@@ -470,6 +473,31 @@ def agent_spec_from_request(req_agent: dict | None) -> str   # 转 "ismcts:500" 
 class ModelRegistry:      # lazy load + 内存缓存，不每次请求读盘
     def get_trainer(self, path: str) -> MCCFRTrainer
 ```
+**响应字段严格白名单（冻结，测试与实现都以此为准）**：
+
+```text
+GameView 顶层（12）:
+  game_id, status, revision, viewer_player_id, phase, current_player,
+  decision_player, observation, public, legal_actions, events, winner
+
+observation（5）:
+  hand, known_top, actions_used, max_actions_per_turn, private_context
+    hand[]                  -> instance_id, card_id, name
+    known_top[]             -> position, card_id, name
+    private_context.cards[] -> token, card_id, name
+
+public（5）:
+  round, deck_count, discard_count, players, turn_no
+public.players[]（7）:
+  player_id, name, alive, hand_count, is_current, is_decision_player, agent
+
+legal_actions[]（6）:
+  id, type, label, enabled, card_instance_id, params
+```
+
+- **不得新增即兴字段**。`deck_size` / `hand_sizes` / `alive` 这类重复信息一律不放在 `public` 顶层：
+  牌堆数量用 `deck_count`、手牌数用 `players[].hand_count`、存活用 `players[].alive`。
+- 上游 `GameState.observation(player)` 已严格只返回 observation 那 5 个键，app 层**只做投影、不加字段**。
 - session 存在进程内存 `dict[str, GameSession]`，含 TTL（默认 3600s）、最大 session 数、
   空闲清理（`SESSION_TTL_SECONDS` / `MAX_SESSIONS` 环境变量）。
 - `GameSession` 内部维护 `{action_id: Action}` 映射，**每次 revision 变化重建**；
@@ -527,8 +555,24 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 
 ---
 
+## 附录 A：已裁决的契约歧义（主控，2026-09-12）
+
+| # | 歧义 | 裁决 |
+|---|---|---|
+| A1 | `GameConfig.deck_composition` 是整体替换还是部分覆盖？ | **部分覆盖**：只覆盖给出的键，未给出的仍按默认线性缩放。 |
+| A2 | `legal_action_dicts()` 的 `REORDER_TOP` 折叠成一条，但 `legal_actions()` 会返回 k! 个排列 | **保持折叠**：该条 `legal_action_dicts` 条目用恒等排列作为稳定 id，前端提交 `payload.order`（token 顺序），后端用 `state.action_from_dict(entry, payload)` 还原真实 `Action`。 |
+| A3 | `AGENT_INFOS` 中 mccfr 的 `defaults.model` | 允许为 `None`（仓库内没有模型文件时 `GET /agents` 退化为通用条目，不得报错）。有 `models/index.json` 时以其中条目为准。 |
+| A4 | `public_state(player)` 的 `player` 参数对返回内容无影响 | 保留参数以对齐签名（公共信息对所有 viewer 一致），实现可忽略该参数。 |
+| A5 | 上游 `GameState.public_state()` 起初额外返回 `deck_size/hand_sizes/alive` | **删除**：`public_state()` 严格 5 键（见 §4.1 白名单）；需要这些字段的调试代码请用 `debug_public_state()`。 |
+| A6 | `main.py play` 的渲染函数曾读取被删除的 `hand_sizes/alive/deck_size` | 已改为读契约字段（`public.players[].hand_count/alive` + `public.deck_count`）。**契约字段被收紧时，必须全仓 grep 旧字段名**。 |
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 | 理由 |
 |---|---|---|
 | 2026-09-12 | 初版冻结 | 多 Agent 并行开发基线 |
+| 2026-09-12 | 新增 §3.5 模型格式 v2（紧凑二进制） | 实测 108 MB → 目标 ≤30 MB；key 编码只解决 1/2 体积 |
+| 2026-09-12 | 新增 §4.1 响应字段严格白名单 | 上游/实现各自加字段导致泄漏面扩大与契约漂移 |
+| 2026-09-12 | 新增附录 A 歧义裁决 | 多 Agent 并行时同名信息出现两种命名（`deck_size` vs `deck_count`）等 |

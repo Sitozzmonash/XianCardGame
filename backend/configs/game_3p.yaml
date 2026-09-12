@@ -1,0 +1,14 @@
+# 3 人游戏环境配置（可直接被 game.config.GameConfig.from_yaml 读取）
+# 用法：
+#   python main.py battle --players 3 --agents rule random ismcts:500 --games 1000
+#   from game import GameConfig; cfg = GameConfig.from_yaml("configs/game_3p.yaml")
+game:
+  players: 3
+  initial_hand: 5
+  max_actions_per_turn: 2
+  max_decisions: 500
+  seed: 42
+  # deck_composition 是「部分覆盖」，只写想改的键（键为 API 卡 id）：
+  # deck_composition:
+  #   TRIBULATION: 2
+  deck_composition: null

@@ -1,0 +1,22 @@
+# 2 人零和 MCCFR 训练配置（验证算法/并行/checkpoint 曲线用）
+# 用法：python main.py train --config configs/train_2p.yaml
+# CLI 参数优先级高于本文件（例：--iterations 500 会覆盖下面的 100000）。
+game:
+  players: 2
+  initial_hand: 5
+  max_actions_per_turn: 2
+  max_decisions: 500
+  seed: 42
+
+training:
+  algorithm: mccfr
+  iterations: 100000
+  workers: 1
+  sync_batch: 1000
+  checkpoint_every: 10000
+  exploration: 0.6
+  log_every: 1000
+
+output:
+  model_dir: models/mccfr_2p
+  name: mccfr_2p_100k

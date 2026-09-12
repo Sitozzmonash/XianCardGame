@@ -1,0 +1,22 @@
+# 3 人 MCCFR 训练配置（多人泛化实验，spec §61 问题 5）
+# 用法：python main.py train --config configs/train_3p.yaml
+# workers>1 是「批量同步近似并行」：工程加速用，严格算法对照请用 workers: 1。
+game:
+  players: 3
+  initial_hand: 5
+  max_actions_per_turn: 2
+  max_decisions: 500
+  seed: 42
+
+training:
+  algorithm: mccfr
+  iterations: 100000
+  workers: 8
+  sync_batch: 1000
+  checkpoint_every: 10000
+  exploration: 0.6
+  log_every: 1000
+
+output:
+  model_dir: models/mccfr_3p
+  name: mccfr_3p_100k
