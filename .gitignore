@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+venv/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# 模型与训练产物（大文件不进 git；用户本地训练生成）
+*.pkl
+*.bin
+backend/logs/*.jsonl
+
+# Node / Expo
+node_modules/
+frontend/.expo/
+frontend/dist/
+frontend/web-build/
+frontend/.expo-shared/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+desktop.ini
+
+# 临时文件
+*.tmp
+tmp/
+scratch/

@@ -1,0 +1,483 @@
+# 修仙卡牌：文件与接口冻结契约
+
+> 本文件是**多 Agent 并行开发的唯一接口权威**。任何 Agent 写代码前必须先读本文件 +
+> `reference/xiuxian_ai_demo/`（可运行的参考实现）+ `docs/`（产品与 API 文档）。
+> 规则、隐藏信息模型、AI 算法语义以 `docs/xiuxian_card_ai_project_spec.md` 为准；
+> HTTP 契约以 `docs/API_CONTRACT.md` 为准；工程结构以 `docs/TECH_ARCHITECTURE.md` 为准。
+>
+> 本文件只冻结**签名、文件归属、命名映射**。不要修改本文件里已冻结的签名；
+> 如确有必要，先在本文件末尾的「变更记录」中写明理由，再同步依赖方。
+
+---
+
+## 0. 仓库结构与文件归属（谁写哪些文件）
+
+```text
+xiuxian-card/
+├── backend/                    # ← Python 包根，所有命令都在 backend/ 下执行
+│   ├── main.py                 # CLI 入口（demo / train / battle / benchmark）
+│   ├── requirements.txt
+│   ├── render.yaml
+│   ├── configs/*.yaml
+│   ├── game/                   # 【C2 负责】环境与规则，不含任何 AI 逻辑
+│   ├── agents/                 # 【C2 负责】random / rule / ismcts / mccfr
+│   ├── training/               # 【C3 负责】MCCFR 训练、checkpoint、并行
+│   ├── evaluation/             # 【C3 负责】对局、锦标赛、指标、Elo
+│   ├── app/                    # 【C4 负责】FastAPI 服务层
+│   ├── models/                 # .pkl 模型（不进 git，除 index.json）
+│   └── tests/                  # 各 Agent 自带测试；跨模块测试由主控 Agent 写
+├── frontend/                   # 【C1 负责】Expo + React Native + TypeScript
+├── docs/                       # 只读：原始交接文档
+├── images/                     # 只读：视觉参考图
+└── reference/xiuxian_ai_demo/  # 只读：原始 Python Demo（不要再改）
+```
+
+**导入约定**：工作目录固定为 `backend/`，包为顶层包（无 `src/`）。
+即 `from game.state import GameState`、`from agents.registry import parse_agent`。
+命令示例：`cd D:/Documents/Hermes/xiuxian-card/backend && python main.py demo`。
+
+**平台约定**：Windows + git-bash。用 `python`（不要用 `python3`）；路径用 `D:/...` 正斜杠风格
+（`/d/...` 会被原生程序误解析）；pip 已配清华镜像；**不要修改 `reference/`**。
+
+---
+
+## 1. `game/` 层（C2）：规则与环境
+
+### 1.1 `game/cards.py`
+
+```python
+class Card(str, Enum):
+    TRIBULATION = "天劫"
+    DEFUSE      = "护劫符"
+    PEEK        = "观星术"
+    REORDER     = "逆天改命"
+    SHUFFLE     = "扰乱天机"
+    SKIP        = "遁术"
+    STEAL       = "摄物术"
+    COUNTER     = "反制符"
+
+CARD_ORDER: tuple[Card, ...]          # 固定顺序，用于编码：TRIBULATION=0 ... COUNTER=7
+CARD_TO_INDEX: dict[Card, int]        # Card -> 0..7
+INDEX_TO_CARD: dict[int, Card]
+API_CARD_ID: dict[Card, str]          # Card.PEEK -> "STARGAZING"（见 1.7 映射表）
+CARD_BY_API_ID: dict[str, Card]
+
+@dataclass(frozen=True)
+class CardSpec:                        # 供 GET /cards 使用
+    id: str            # "STARGAZING"
+    name: str          # "观星术"
+    category: str      # "TRIBULATION" | "DEFUSE" | "ACTIVE" | "REACTIVE"
+    description: str   # 中文效果说明
+    asset: str         # 前端资源名，小写下划线，如 "stargazing"
+
+CARD_SPECS: tuple[CardSpec, ...]       # 8 张，顺序 = CARD_ORDER
+def card_spec(card: Card) -> CardSpec
+```
+
+- `Card.value` 保持中文（日志、前端文案依赖它），**英文 id 只在 API 层用 `API_CARD_ID`**。
+- 8 张牌的顺序一旦发布不得变更（编码与模型文件兼容性依赖）。
+
+### 1.2 `game/config.py`
+
+```python
+@dataclass
+class GameConfig:
+    num_players: int = 3               # 2..6
+    initial_hand: int = 5
+    max_actions_per_turn: int = 2
+    max_decisions: int = 500
+    seed: int = 42
+    deck_composition: Optional[dict[str, int]] = None   # 可选覆盖；键为 API 卡 id
+    def validate(self) -> None: ...
+    def to_dict(self) -> dict
+    @classmethod
+    def from_dict(cls, d: dict) -> "GameConfig"
+    @classmethod
+    def from_yaml(cls, path: str) -> "GameConfig"
+```
+- `deck_composition=None` 时按参考实现线性缩放（每人数 N 时 `PEEK=2N, REORDER=N, SHUFFLE=N,
+  SKIP=2N, STEAL=N, COUNTER=N, DEFUSE=额外 max(1, N//2)`），天劫固定 `N-1` 张。
+- 保持参考实现规则不变：每人开局 1 张护劫符、初始手牌不含天劫、随机决定先手。
+
+### 1.3 `game/actions.py`
+
+```python
+class ActionKind(str, Enum):
+    END_TURN, PLAY_PEEK, PLAY_REORDER, PLAY_SHUFFLE, PLAY_SKIP, PLAY_STEAL,
+    PASS_COUNTER, PLAY_COUNTER, REORDER_TOP, REINSERT      # 成员名为英文
+
+@dataclass(frozen=True)
+class Action:
+    kind: ActionKind
+    target: int = -1
+    param: str = ""
+    def key(self) -> str            # f"{kind.value}|{target}|{param}"，中文值，稳定可比
+    def __str__(self) -> str        # 中文人读形式（保持参考实现风格）
+    def api_type(self) -> str       # 见 1.7 动作映射
+```
+- `Action` 必须可哈希、可相等比较（放进 set/dict 做合法动作校验）。
+- `param` 语义：`REINSERT` 用 `"TOP"|"NEAR_TOP"|"MIDDLE"|"BOTTOM"`；
+  `REORDER_TOP` 用 `"102"` 形式的 0-based 排列串（长度 = 可排序张数）。
+
+### 1.4 `game/state.py`
+
+```python
+class Phase(str, Enum):
+    ACTION, COUNTER, REORDER, REINSERT, ENDED      # 成员名为英文
+
+class GameState:
+    config: GameConfig
+    num_players: int
+    hands: list[list[Card]]
+    deck: list[Card]                       # deck[0] 为牌堆顶
+    discard: list[Card]
+    alive: list[bool]
+    known_top: list[list[Card]]            # 各玩家已知的牌顶序列
+    current_player: int
+    phase: Phase
+    actions_used: int
+    turn_no: int
+    decision_count: int
+    winner: Optional[int]
+    forced_stop: bool
+    logs: list[str]
+    rng: random.Random
+
+    def __init__(self, config: GameConfig, seed: Optional[int] = None): ...
+    def reset(self) -> "GameState"                 # 重新发牌，返回自身
+    def clone(self) -> "GameState"                 # 必须同时复制 rng state 与隐藏信息
+    def is_terminal(self) -> bool
+    def decision_player(self) -> int
+    def legal_actions(self) -> list[Action]
+    def step(self, action: Action) -> None         # 非法动作抛 ValueError
+    def utilities(self) -> list[float]             # 赢家 +1，其余 -1/(N-1)；forced_stop/平局全 0
+    def infoset_key(self, player: int) -> tuple     # 紧凑、可哈希，见 1.5
+    def observation(self, player: int) -> dict      # API_CONTRACT §9 结构，见 1.6
+    def public_state(self, player: int) -> dict     # API_CONTRACT §8 结构
+    def legal_action_dicts(self, player: int) -> list[dict]   # 由 app 层调用，见 1.7
+    def determinize_for(self, observer: int, seed: Optional[int] = None) -> "GameState"
+    def debug_string(self, reveal_all: bool = False) -> str
+```
+- 规则语义**必须**与 `reference/xiuxian_ai_demo/xiuxian/game.py` 等价（除 infoset 编码与
+  `observation` 结构调整外，逐条行为一致）。C2 必须写测试证明黄金种子下与参考实现逐步一致。
+- `step()` 里 `decision_count > max_decisions` → `forced_stop=True, phase=ENDED`（平局），保持参考行为。
+
+### 1.5 紧凑 Information Set（关键改动）
+
+```python
+def infoset_key(self, player: int) -> tuple   # 返回值必须全部由 int / tuple[int] 组成
+```
+编码方案（**替换参考实现里的 `repr(...)` 大字符串**）：
+
+```text
+(
+  player,                    # int
+  phase_index,               # int 0..4
+  current_player,            # int
+  decision_player,           # int
+  actions_used,              # int
+  deck_size,                 # int
+  hand_sig,                  # tuple[int]  自身手牌按 CARD_TO_INDEX 排序后的计数向量（长度 8）
+  known_top,                 # tuple[int]  自身 known_top 的卡 index 序列
+  reorder_private,           # tuple[int]  仅当自己是 reorder_owner 时非空
+  hand_sizes,                # tuple[int]  长度 N
+  alive_mask,                # int        位掩码
+  discard_sig,               # tuple[int]  长度 8
+  pending,                   # tuple[int,int]  仅 COUNTER 阶段为真实值，否则 (-1,-1)
+)
+```
+- 禁止在 key 中出现 `str`、`Card`、`float`。**这是模型体积从 124MB 降到 <10MB 的核心**。
+- `hand_sig` 用计数向量而非 tuple(卡)（手牌顺序对决策无意义，且能进一步压缩）。
+- 保持语义：两个对 `player` 不可区分的 GameState 必须映射到同一个 key；
+  反之不要求（碰撞只影响收敛速度，不影响正确性，但不要主动制造碰撞）。
+
+### 1.6 `observation(player)` 返回结构（API_CONTRACT §9）
+
+```python
+{
+  "hand": [{"instance_id": "h_0_0", "card_id": "STARGAZING", "name": "观星术"}],
+  "known_top": [{"position": 0, "card_id": "TRIBULATION", "name": "天劫"}],
+  "actions_used": 1,
+  "max_actions_per_turn": 2,
+  "private_context": None | {"cards": [{"token": "private_1", "card_id": "...", "name": "..."}]},
+}
+```
+- `instance_id` 规则：`f"h_{player}_{index}"`（index = 手牌列表下标）。手牌变化后 index 会变，
+  前端每次 action 后都会拿到完整视图，因此不要求跨 revision 稳定。
+- `private_context` 仅在 `Phase.REORDER` 且 `decision_player == player` 时非空，
+  `token` 用 `private_1..private_k`（**绝不暴露真实 deck index**）。同一 revision 内，
+  token → 卡牌的映射必须与 `legal_action_dicts` 的 `REORDER_TOP` 一致。
+- 绝不允许出现其他玩家手牌、真实牌堆、他人私有观星结果。**C4 必须写自动测试断言。**
+
+### 1.7 卡 id / 动作类型映射表（冻结，前后端共用）
+
+| Card 成员 | API card_id | 中文名 | category | asset |
+|---|---|---|---|---|
+| TRIBULATION | `TRIBULATION` | 天劫 | TRIBULATION | tribulation |
+| DEFUSE | `DEFUSE` | 护劫符 | DEFUSE | defuse |
+| PEEK | `STARGAZING` | 观星术 | ACTIVE | stargazing |
+| REORDER | `REWRITE_FATE` | 逆天改命 | ACTIVE | rewrite_fate |
+| SHUFFLE | `SHUFFLE` | 扰乱天机 | ACTIVE | shuffle |
+| SKIP | `ESCAPE` | 遁术 | ACTIVE | escape |
+| STEAL | `STEAL` | 摄物术 | ACTIVE | steal |
+| COUNTER | `COUNTER` | 反制符 | REACTIVE | counter |
+
+`Action.api_type()` 映射（API_CONTRACT §10-12）：
+
+| ActionKind | api type | 说明 |
+|---|---|---|
+| END_TURN | `END_ACTION` | label「结束行动并抽牌」 |
+| PLAY_PEEK/PLAY_REORDER/PLAY_SHUFFLE/PLAY_SKIP | `PLAY_CARD` | 带 `card_instance_id` |
+| PLAY_STEAL | `PLAY_CARD_TARGET` | `params.target_player = {type:"enum", options:[...]}` |
+| PLAY_COUNTER | `COUNTER` | |
+| PASS_COUNTER | `PASS_COUNTER` | |
+| REORDER_TOP | `REORDER_TOP` | `params.order = {type:"token_order"}` |
+| REINSERT | `REINSERT_TRIBULATION` | `params.region = {type:"enum", options:[TOP,NEAR_TOP,MIDDLE,BOTTOM]}` |
+
+`legal_action_dicts(player)` 每条结构：
+
+```python
+{"id": "a_<8位稳定哈希>", "type": "...", "label": "使用观星术", "enabled": True,
+ "card_instance_id": "h_0_0" | None, "params": None | {...}}
+```
+- `id` 必须**在同一 revision 内稳定**（前端拿 id 提交），生成方式：
+  `f"a_{blake2b(action.key().encode(), digest_size=4).hexdigest()}"`，
+  `REORDER_TOP` / `REINSERT` / 多目标 `PLAY_CARD_TARGET` 的 id 需**按可选值拆成多条**：
+  - `REORDER_TOP`：**一条** action，`params.order` 给出 token 枚举（提交时带 `payload.order`）。
+  - `REINSERT_TRIBULATION`：**四条**，每条 `params.region.options` 只含自身区域，label 形如「回插：牌堆顶」。
+  - `PLAY_CARD_TARGET`：**每个可选目标一条**，label 形如「使用摄物术 → P2」，payload 只需 `target_player`。
+- 前端**只发 `action_id` + `payload`**，后端用 `(revision, action_id)` 反查真实 Action（见 §4）。
+
+### 1.8 `game/__init__.py` 导出
+
+```python
+from .cards import Card, CardSpec, CARD_SPECS, CARD_ORDER, API_CARD_ID, card_spec
+from .config import GameConfig
+from .actions import Action, ActionKind
+from .state import GameState, Phase
+```
+
+---
+
+## 2. `agents/` 层（C2）
+
+```python
+# agents/base.py
+class BaseAgent:
+    name: str
+    def act(self, state: GameState, player: int) -> Action: raise NotImplementedError
+
+# agents/random_agent.py
+class RandomAgent(BaseAgent):  __init__(self, seed: int = 0)
+
+# agents/rule_agent.py
+class RuleAgent(BaseAgent):    __init__(self, seed: int = 0)
+
+# agents/ismcts/agent.py
+class ISMCTSAgent(BaseAgent):
+    __init__(self, simulations: int = 500, exploration: float = 1.4,
+             max_depth: int = 250, seed: int = 0, rollout_agent: BaseAgent | None = None)
+
+# agents/mccfr/agent.py
+class MCCFRAgent(BaseAgent):
+    __init__(self, trainer: "MCCFRTrainer", seed: int = 0)
+    @classmethod
+    def load(cls, path: str, seed: int = 0) -> "MCCFRAgent"
+
+# agents/registry.py
+AGENT_INFOS: list[dict]      # 供 GET /agents：{id,name,type,configurable,defaults?}
+def parse_agent(spec: str, seed: int = 0) -> BaseAgent
+# spec 语法： "random" | "rule" | "ismcts:<sims>" | "mccfr:<path.pkl>"
+# 支持 "ismcts:500:1.4" 形式覆盖 exploration，缺省 1.4
+```
+- 所有 Agent **不得读取** `state.deck` / `state.hands[other]` / `state.known_top[other]` 做决策；
+  ISMCTS 只能通过 `state.determinize_for(player, seed)` 获取可能世界。C2 需写「作弊检测」测试。
+- MCCFRAgent 遇到未见 info set → 回落到 `RuleAgent`（spec §33）。
+- 保留参考实现的算法定性：Single-Observer ISMCTS（教学版）、Outcome-Sampling MCCFR。
+
+---
+
+## 3. `training/` + `evaluation/` 层（C3）
+
+### 3.1 `training/trainer.py`
+
+```python
+class MCCFRTrainer:
+    def __init__(self, config: GameConfig, seed: int = 0, exploration: float = 0.6): ...
+    regret_sum: dict[tuple, dict[str, float]]     # key = infoset_key 的 tuple
+    strategy_sum: dict[tuple, dict[str, float]]
+    iterations_done: int
+    traversals_done: int
+    def train(self, iterations: int, workers: int = 1, sync_batch: int = 1000,
+              checkpoint_every: int = 0, checkpoint_prefix: str | None = None,
+              log_every: int = 1000, progress: bool = True) -> None
+    def average_strategy(self, state: GameState, player: int) -> dict[str, float]
+    def stats(self) -> dict      # iterations/traversals/infosets/iter_per_sec/elapsed
+    def save(self, path: str) -> None
+    @classmethod
+    def load(cls, path: str) -> "MCCFRTrainer"     # 必须能读旧格式（str key 的 .pkl）
+```
+- 模型文件 = `pickle` 的 dict：`{format_version, config, seed, exploration,
+  iterations_done, traversals_done, regret_sum, strategy_sum}`，`pickle.HIGHEST_PROTOCOL`。
+- `load()` 需兼容参考实现产出的 `models/mccfr_2p_10k.pkl`（旧 key 为 `repr(str)`），
+  读到旧格式时把 key 原样保留（字符串 key 也可正常工作），不要求迁移。
+- 训练日志：中文，含 `iter/s`、信息集数量、elapsed、checkpoint 路径（spec §56）；
+  同时追加机器可读 JSON 行到 `logs/train_metrics.jsonl`。
+- 并行：`ProcessPoolExecutor`，批量同步近似（spec §37-38）。`workers=1` 为严格基线。
+  Worker 函数必须定义在模块顶层（Windows spawn 需要可 pickle）。
+- 必须支持 `resume`：`main.py train --resume <pkl> --iterations N` 在原基础上继续。
+
+### 3.2 `training/config.py`
+
+YAML 结构（spec §39）：
+
+```yaml
+game:   {players: 3, initial_hand: 5, max_actions_per_turn: 2, seed: 42}
+training: {algorithm: mccfr, iterations: 100000, workers: 8, sync_batch: 1000,
+           checkpoint_every: 10000, exploration: 0.6, log_every: 1000}
+output: {model_dir: models/mccfr_3p, name: mccfr_3p_100k}
+```
+```python
+def load_train_config(path: str) -> dict    # 校验字段、给默认值
+```
+
+### 3.3 `evaluation/`
+
+```python
+# match.py
+@dataclass
+class GameResult: winner_seat: int | None; decisions: int; forced_stop: bool; state: GameState
+def play_game(config: GameConfig, agents: Sequence[BaseAgent], seed: int,
+              verbose: bool = False, log_sink: Callable[[str], None] | None = None) -> GameResult
+
+# tournament.py
+def run_tournament(config: GameConfig, agent_specs: list[str], games: int,
+                   seed: int = 0, seat_randomize: bool = True) -> dict
+# 返回：{games, wins, win_rates, draws, avg_decisions, seat_win_rates,
+#        ci95: {label: [lo, hi]}, decisions_histogram?}
+
+# metrics.py
+def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]
+
+# elo.py
+class EloTable:  # update(results) / table 属性 / 中文报表
+```
+- 座位随机化：每局把 agent 随机分配座位，统计各座位胜率（spec §44）。
+- 多人终局：`winner_seat=None` 记平局。
+
+### 3.4 CLI（`backend/main.py`，C3 负责）
+
+必须实现（spec §39-43、§67）：
+
+```bash
+python main.py demo   [--players 3] [--simulations 200] [--seed 42] [--agents rule ismcts:200 random]
+python main.py train  [--config configs/train_2p.yaml] | [--players 3 --iterations 100000 --workers 8
+                       --sync-batch 1000 --exploration 0.6 --checkpoint-every 10000
+                       --out models/x.pkl] [--resume models/x.pkl]
+python main.py battle --players 2 --agents mccfr:models/a.pkl ismcts:500 --games 5000 [--seed 42]
+python main.py benchmark --agents rule ismcts:100 ismcts:500 --opponent random --games 500
+python main.py play   [--players 3] [--seed 42]        # 终端人机对战
+python main.py serve  [--host 0.0.0.0] [--port 8000] [--reload]   # 启动 FastAPI
+```
+- 训练/评测日志中文；`battle` 输出胜率、95% 置信区间、平均决策步数、座位胜率表。
+- `serve` 用 `uvicorn app.main:app`（内部调用，勿重新造轮子）。
+
+---
+
+## 4. `app/` 层（C4）：FastAPI
+
+严格实现 `docs/API_CONTRACT.md` 全部接口：
+
+```text
+GET    /api/v1/health
+GET    /api/v1/agents
+GET    /api/v1/cards
+POST   /api/v1/games
+GET    /api/v1/games/{game_id}
+POST   /api/v1/games/{game_id}/actions
+DELETE /api/v1/games/{game_id}
+```
+
+### 4.1 关键服务层约定
+
+```python
+# app/services/game_session.py
+class GameSession:
+    game_id: str
+    revision: int                       # 每次状态变化 +1
+    human_player_id: int | None
+    def view_for(self, player: int) -> dict          # GameView（含 observation/public/legal_actions/events）
+    def act(self, action_id: str, payload: dict, revision: int) -> dict
+    def run_ai_until_human(self) -> None             # AI 连续行动到人类决策点/终局
+    def is_terminal(self) -> bool
+    def destroy(self) -> None
+
+# app/services/agent_factory.py
+def build_agent(spec: dict, seed: int) -> BaseAgent      # {"type":"ismcts","simulations":500}
+def agent_spec_from_request(req_agent: dict | None) -> str   # 转 "ismcts:500" / "mccfr:models/x.pkl"
+
+# app/services/model_registry.py
+class ModelRegistry:      # lazy load + 内存缓存，不每次请求读盘
+    def get_trainer(self, path: str) -> MCCFRTrainer
+```
+- session 存在进程内存 `dict[str, GameSession]`，含 TTL（默认 3600s）、最大 session 数、
+  空闲清理（`SESSION_TTL_SECONDS` / `MAX_SESSIONS` 环境变量）。
+- `GameSession` 内部维护 `{action_id: Action}` 映射，**每次 revision 变化重建**；
+  提交时校验 `revision` 匹配（不匹配 → 409 `STALE_REVISION`）+ 动作仍合法。
+- 事件流：`GameSession` 用 `state.logs` 之外的**结构化事件**驱动动画。约定事件类型见
+  API_CONTRACT §13；每种状态变化必须产出至少一条事件。事件必须是「该 viewer 可见」的信息
+  （他人观星只发 `CARD_PLAYED`，不带牌面）。
+- 错误格式统一 `{"error": {"code","message","details"}}`；状态码按 API_CONTRACT §3。
+
+### 4.2 环境变量（`app/core/config.py`）
+
+```text
+APP_ENV, CORS_ORIGINS, DEFAULT_ISMCTS_SIMULATIONS=500, MODEL_DIR=models,
+SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
+```
+
+---
+
+## 5. `frontend/` 层（C1）：Expo
+
+- 技术栈（FRONTEND_GUIDE §1）：Expo SDK（latest 稳定版）+ TypeScript + expo-router +
+  Zustand + react-native-reanimated + react-native-gesture-handler + expo-image +
+  expo-linear-gradient。**不要引入 Skia / 游戏引擎。**
+- 页面：`app/index.tsx`(Home) `app/setup.tsx` `app/battle.tsx` `app/cards.tsx` `app/result.tsx`
+  （`app/ai-lab.tsx` 可做但允许 disabled 占位）。
+- 组件目录按 TECH_ARCHITECTURE §6：`src/api/{client,game}.ts`、`src/components/{game-card,
+  player-panel,deck-pile,action-bar,dialogs}`、`src/store/game-store.ts`、`src/theme/`、
+  `src/types/`。
+- 设计 token（FRONTEND_GUIDE §3，冻结）：`background #06191B`、`surface #0B2929`、
+  `jade #1C716B`、`jadeLight #57B3A4`、`gold #C9A65A`、`goldLight #E3CC91`、
+  `paper #E8DEC5`、`danger #A4423D`、`text #F0E8D2`、`muted #91A6A0`。
+- 铁律：
+  1. 所有按钮/可点击卡牌由 **`legal_actions`** 驱动，前端**不得**自己判断规则合法性；
+  2. 不发 `fetch()` 到页面里，统一走 `src/api/client.ts`（`EXPO_PUBLIC_API_BASE_URL`）；
+  3. 提交动作带 `revision`，提交期间 lock input，收到 events 后按序播放再 unlock；
+  4. 特殊 Phase 拆成独立弹窗组件，不塞进 `battle.tsx`；
+  5. 响应式：`SafeAreaView` + `useWindowDimensions()`，不硬编码绝对像素；
+  6. 无后端时可用 mock GameView 渲染（`src/api/mock.ts`），但代码路径与真后端一致。
+- 验证（C1 必须自己跑通并给出命令输出）：
+  ```bash
+  cd D:/Documents/Hermes/xiuxian-card/frontend
+  npx tsc --noEmit
+  npx expo export --platform web --output-dir dist
+  ```
+  web 导出成功即视为「可运行」证据；同时用 `npx expo start --web` 可人工查看。
+
+---
+
+## 6. 主控 Agent 负责（不由子 Agent 承担）
+
+- `docs/INTERFACES.md`（本文件）、`.gitignore`、`README.md`、`.env.example`
+- 跨模块测试（黄金种子一致性、隐藏信息泄漏、完整一局 E2E、并发/重复提交）
+- 前端 ↔ 后端真机联调脚本与最终验收
+
+---
+
+## 变更记录
+
+| 日期 | 变更 | 理由 |
+|---|---|---|
+| 2026-09-12 | 初版冻结 | 多 Agent 并行开发基线 |
