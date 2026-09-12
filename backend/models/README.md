@@ -18,6 +18,10 @@ champion.pkl          # 当前 Champion（后续 Champion 系统使用）
 
 ## index.json
 
+⚠️ `index.json` 记录的是**本地产物清单**：`*.pkl` 不入 git，所以刚克隆仓库时清单里的条目
+在本机并不存在 —— 前端会列出它们，选中后建局报 `MODEL_LOAD_ERROR`。
+请先训练自己的模型，再刷新清单。
+
 `models/index.json` 用于 `GET /agents` 列出可选模型（前端按 `players` 过滤）。
 **训练完请刷新清单**（不用手写）：
 
