@@ -382,6 +382,56 @@ python main.py serve  [--host 0.0.0.0] [--port 8000] [--reload]   # 启动 FastA
 - 训练/评测日志中文；`battle` 输出胜率、95% 置信区间、平均决策步数、座位胜率表。
 - `serve` 用 `uvicorn app.main:app`（内部调用，勿重新造轮子）。
 
+### 3.5 模型格式 v2（紧凑二进制）— 冻结
+
+> 背景（实测）：同一张表（2 人 10K，433,819 信息集 / 2,354,072 条目）
+> `repr` 字符串 key = 199.9 MB；紧凑 tuple key = 103.3 MB。其中 key 占 27.5 MB，
+> **行数据（中文字符串动作 key + Python float）占 68.8 MB**。因此必须再加一层二进制序列化。
+
+```python
+# training/codec.py
+FORMAT_VERSION = 2
+
+def pack_infoset_key(key: tuple) -> bytes        # 变长打包，目标 ≤ 32 B/key
+def unpack_infoset_key(blob: bytes) -> tuple
+ACTION_ID: dict[str, int]                        # 动作 key 字符串 -> uint16
+ACTION_KEY: list[str]                            # 反查表
+```
+
+容器结构（`pickle` 一个只含 `bytes`/`int`/`dict` 的扁平 dict，不含嵌套 dict-of-dict）：
+
+```python
+{
+  "format_version": 2,
+  "encoding": "packed-v2",
+  "config": {...}, "seed": int, "exploration": float,
+  "iterations_done": int, "traversals_done": int,
+  "n_infosets": int,
+  "action_table": [str, ...],   # 去重后的动作 key 字符串表（通常只有几十条）
+  "key_blob": bytes,            # 每信息集：uint16 payload_len + 打包 key（按 key 排序，便于流式还原）
+  "regret_blob": bytes,         # 每信息集：uint8 n_action + n×uint16 action_id + n×float32 regret
+  "strategy_blob": bytes,       # 同上，值为平均策略
+  "strategy_only": bool,        # True 时 regret_blob 为空（部署产物）
+}
+```
+
+要求：
+
+1. `MCCFRTrainer.save(path, strategy_only: bool = False)` 默认写 **v2**；
+   `strategy_only=True` 时只写平均策略（部署用，最小体积）。
+2. `MCCFRTrainer.load(path)` 必须同时支持 **v1（旧 plain dict，含 `repr` 字符串 key）与 v2**，
+   行为一致；加载旧模型后仍可续训（内部转换为紧凑表示）。
+3. `MCCFRAgent.load(path)` 支持两代格式；遇到 `strategy_only` 模型直接推理，不报错。
+4. `main.py train` 增加 `--strategy-only` 与 `--format {v2,v1}`（默认 v2）；
+   `main.py models`（新增）打印 `models/` 下每个模型的元信息与体积、格式、能否加载。
+5. **验收指标**（2 人 10K，433,819 信息集 / 2,354,072 条目）：
+   - 全量模型（regret + strategy）≤ 30 MB
+   - 仅策略模型 ≤ 15 MB
+   - 加载耗时 ≤ 5 s（本地 SSD）
+   - round-trip 后 regret/strategy 数值与 Python dict 版本逐项一致（float32 允许 1e-6 误差）
+6. 测试：`test_training_codec.py`（round-trip、越界 key、空表、动作表去重）、
+   `test_training_format.py`（v1/v2 互读、`strategy_only` 推理、体积断言）。
+
 ---
 
 ## 4. `app/` 层（C4）：FastAPI
@@ -443,11 +493,12 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 - 技术栈（FRONTEND_GUIDE §1）：Expo SDK（latest 稳定版）+ TypeScript + expo-router +
   Zustand + react-native-reanimated + react-native-gesture-handler + expo-image +
   expo-linear-gradient。**不要引入 Skia / 游戏引擎。**
-- 页面：`app/index.tsx`(Home) `app/setup.tsx` `app/battle.tsx` `app/cards.tsx` `app/result.tsx`
-  （`app/ai-lab.tsx` 可做但允许 disabled 占位）。
-- 组件目录按 TECH_ARCHITECTURE §6：`src/api/{client,game}.ts`、`src/components/{game-card,
-  player-panel,deck-pile,action-bar,dialogs}`、`src/store/game-store.ts`、`src/theme/`、
-  `src/types/`。
+- 页面（**注意：Expo SDK 57 默认模板的路由目录是 `frontend/src/app/`**，不是 `app/`）：
+  `src/app/_layout.tsx`、`src/app/index.tsx`(Home)、`src/app/setup.tsx`、`src/app/battle.tsx`、
+  `src/app/cards.tsx`、`src/app/result.tsx`（`src/app/ai-lab.tsx` 可做但允许 disabled 占位）。
+- 组件目录按 TECH_ARCHITECTURE §6（同样落在 `src/` 下）：`src/api/{client,game,mock}.ts`、
+  `src/components/{game-card,player-panel,deck-pile,action-bar,dialogs}`、`src/store/game-store.ts`、
+  `src/theme/`、`src/types/`。
 - 设计 token（FRONTEND_GUIDE §3，冻结）：`background #06191B`、`surface #0B2929`、
   `jade #1C716B`、`jadeLight #57B3A4`、`gold #C9A65A`、`goldLight #E3CC91`、
   `paper #E8DEC5`、`danger #A4423D`、`text #F0E8D2`、`muted #91A6A0`。

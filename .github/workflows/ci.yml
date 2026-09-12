@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端测试（规则 / 隐藏信息 / 训练 / 评测 / API）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 单元测试
+        run: python -m pytest tests -v
+      - name: 冒烟：跑一局（中文日志）
+        run: python main.py demo --players 3 --simulations 20 --seed 7
+      - name: 冒烟：小规模训练 + 续训
+        run: |
+          python main.py train --players 2 --iterations 50 --workers 1 \
+            --out models/_ci.pkl --log-every 25
+          python main.py train --resume models/_ci.pkl --iterations 25 --out models/_ci2.pkl
+      - name: 冒烟：AI 对战
+        run: python main.py battle --players 2 --agents random rule --games 10
+
+  frontend:
+    name: 前端类型检查 + Web 构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: TypeScript 类型检查
+        run: npx tsc --noEmit
+      - name: Web 构建（export）
+        run: npx expo export --platform web --output-dir dist
+        env:
+          EXPO_NO_TELEMETRY: "1"
+      - name: 上传 Web 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-web-dist
+          path: frontend/dist
+          retention-days: 7
