@@ -7,6 +7,7 @@
 （Random / Rule / ISMCTS / MCCFR）。
 
 - 规格与算法依据：[`docs/xiuxian_card_ai_project_spec.md`](docs/xiuxian_card_ai_project_spec.md)
+- **运行手册（命令 / 训练耗时 / 体积与内存 / 常见问题）**：[`docs/RUNBOOK.md`](docs/RUNBOOK.md)
 - 接口契约（前后端唯一权威）：[`docs/API_CONTRACT.md`](docs/API_CONTRACT.md)、[`docs/INTERFACES.md`](docs/INTERFACES.md)
 - 工程架构：[`docs/TECH_ARCHITECTURE.md`](docs/TECH_ARCHITECTURE.md)
 - 开发顺序：[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md)

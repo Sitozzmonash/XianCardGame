@@ -31,8 +31,26 @@
 ## 3. 已知待修（不阻塞换皮）
 
 1. 各路由导出的 HTML `<title>` 为空（需要给每个路由设标题，做 web 分享/SEO 时必须有）。
+   —— 注：C1 在被暂停前已修（`src/app/_sitemap.tsx` + 各路由 Head），需重新 export 复验。
 2. mock 目前是默认数据源，改完后默认真后端，仅 `EXPO_PUBLIC_USE_MOCK=1` 时用 mock。
-3. 视觉细节：参考图分辨率不足，卡面装饰、法阵、云雾、粒子的真实质感无法从图里还原。
+   —— 已修：`src/api/client.ts` 默认走真后端，首页另有运行期「使用演示数据」入口。
+3. **他人出牌显示成【未知牌】**：`CARD_PLAYED` 是公开事件且带 `card_id`，应显示牌名；
+   当前 UI 过度保护，丢掉了玩家有权知道的公开信息。
+4. 战斗日志偶发截断渲染（如 `[12] 遁`），需要检查日志行的文案拼接。
+5. 视觉细节：参考图分辨率不足，卡面装饰、法阵、云雾、粒子的真实质感无法从图里还原。
+
+## 3.1 真后端联调已实测通过（2026-09-12）
+
+用 `EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:8020/api/v1 npx expo export --platform web` 构建
+（默认即真后端，无需 `EXPO_PUBLIC_USE_MOCK`），浏览器实测：
+
+- 首页显示「数据源：真实后端 / 已连接 0.1.0」（真调 `/health`）
+- Setup → 开始 → `POST /api/v1/games` → 进入 Battle，显示后端真实数据（3 人牌堆 15 张、revision 1）
+- 点「结束行动并抽牌」→ `POST /api/v1/games/{id}/actions` → revision 1→5（人类动作 + AI 自动行动）
+- 战斗日志出现 AI 真实回合（观星术 / 遁术跳过抽牌），他人抽牌显示「牌面仅本人可见」
+- 事件动画队列工作：出现「动画播放中（剩余 N）」且输入被锁定为「处理中…」
+
+截图：`docs/screenshots/04_battle_real_backend.png`、`05_battle_real_play.png`
 
 ## 4. 需要从 Figma 拿到什么（交接清单）
 

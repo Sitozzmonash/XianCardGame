@@ -427,12 +427,17 @@ ACTION_KEY: list[str]                            # 反查表
 3. `MCCFRAgent.load(path)` 支持两代格式；遇到 `strategy_only` 模型直接推理，不报错。
 4. `main.py train` 增加 `--strategy-only` 与 `--format {v2,v1}`（默认 v2）；
    `main.py models`（新增）打印 `models/` 下每个模型的元信息与体积、格式、能否加载。
-5. **验收指标**（2 人 10K，433,819 信息集 / 2,354,072 条目）：
-   - 全量模型（regret + strategy）≤ 30 MB
-   - 仅策略模型 ≤ 15 MB
-   - 加载耗时 ≤ 5 s（本地 SSD）
-   - round-trip 后 regret/strategy 数值与 Python dict 版本逐项一致（float32 允许 1e-6 误差）
-6. 测试：`test_training_codec.py`（round-trip、越界 key、空表、动作表去重）、
+5. **验收指标**（以 C3 实测校准，2026-09-12；2 人 10K，433,819 信息集 / 1,177,036 条目）：
+   - 现状（冻结的 `dict[tuple, dict[str,float]]` 表示）：124.0 MB（旧 repr）→ 102.5 MB（紧凑 tuple）
+     → **61.2 MB（+动作 key 池化）**。该表示的地板约 40–50 MB，**因此"<10MB"用现表示不可达**。
+   - 二进制存储目标：**全量（regret + strategy）≤ 30 MB**、**仅策略（部署产物）≤ 20 MB**、
+     每信息集 ≤ 60 B（全量）/ ≤ 45 B（仅策略）、加载耗时 ≤ 5 s（本地 SSD）。
+   - round-trip 后 regret/strategy 数值与 Python dict 版本逐项一致（float32 允许 1e-6 误差）。
+6. **规模定律（必须写进 README/RUNBOOK）**：信息集数量 ≈ **42 个/迭代**（10K → 43 万），
+   近似线性增长 → 100K ≈ 420 万信息集、1M ≈ 4200 万。体积与内存同步放大：
+   **100K 全量约 600 MB（现表示）**，二进制后约 200 MB 量级。要真正规模化必须做状态抽象 /
+   相似信息集合并（spec §33、§61 问题 6），而不是继续堆迭代数。
+7. 测试：`test_training_codec.py`（round-trip、越界 key、空表、动作表去重）、
    `test_training_format.py`（v1/v2 互读、`strategy_only` 推理、体积断言）。
 
 ---

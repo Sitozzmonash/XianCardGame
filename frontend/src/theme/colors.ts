@@ -32,6 +32,76 @@ export const colors = {
 
 export type ColorToken = keyof typeof colors;
 
+/**
+ * 第二套色板：夜蓝青瓷 —— 用于「首页 / 对局 / 卡牌详情」三屏。
+ * 数值来自设计图 2x 原图（images/figma/fig3_*.png）的像素采样，不是目测。
+ * 「对战配置 / 结算」两屏继续用上面的墨玉色板（与 FRONTEND_GUIDE 冻结 token 一致）。
+ */
+export const nightColors = {
+  /** 主背景 */
+  background: '#0E1A22',
+  /** 更深的底（底部栏 / 卡牌间隙） */
+  backgroundDeep: '#070F14',
+  /** 面板底 */
+  surface: '#13232F',
+  /** 抬升面板 */
+  surfaceRaised: '#1A2C39',
+  /** 对手面板 / 信息卡 */
+  panel: '#263E4D',
+  panelSoft: '#2D4857',
+  /** 青瓷（标题、描边、重要文字） */
+  celadon: '#78B2C4',
+  celadonLight: '#B3D4D7',
+  /** 玉绿（按钮、高亮、阶段提示） */
+  jade: '#4EB294',
+  jadeDeep: '#165E4E',
+  jadeMid: '#348470',
+  /** 卡面米黄 + 卡框金 */
+  card: '#F5E6C8',
+  cardShade: '#E1C89D',
+  cardEdge: '#C9A65A',
+  cardEdgeSoft: 'rgba(201, 166, 90, 0.55)',
+  /** 金（按钮/角标） */
+  gold: '#BEA144',
+  goldSoft: '#8D7A46',
+  /** 文字 */
+  text: '#E8F1F2',
+  textStrong: '#FFFFFF',
+  muted: '#8FA3AD',
+  /** 状态 */
+  danger: '#A4423D',
+  dangerSoft: 'rgba(164, 66, 61, 0.55)',
+  disabled: 'rgba(143, 163, 173, 0.38)',
+  /** 描边 / 分隔 */
+  hairline: 'rgba(120, 178, 196, 0.22)',
+  border: 'rgba(120, 178, 196, 0.34)',
+  borderStrong: 'rgba(120, 178, 196, 0.62)',
+  /** 覆盖层 */
+  overlay: 'rgba(4, 10, 14, 0.84)',
+  scrim: 'rgba(4, 10, 14, 0.52)',
+  transparent: 'transparent',
+  white: '#FFFFFF',
+  black: '#000000',
+} as const;
+
+/** 夜蓝色板的渐变（LinearGradient 需要 readonly string[]） */
+export const nightGradients = {
+  /** 首页：夜色 → 青瓷天光 */
+  home: ['#0E1A22', '#1B3345', '#78B2C4', '#B3D4D7'] as const,
+  /** 对局：深墨蓝 */
+  battle: ['#070F14', '#0E1A22', '#263E4D'] as const,
+  /** 卡牌详情：近乎纯黑 → 暗蓝 */
+  detail: ['#040506', '#0B0D0E', '#0E1A22'] as const,
+  /** 卡面米黄 */
+  cardFace: ['#F7EBD2', '#F5E6C8', '#E1C89D'] as const,
+  /** 玉绿主按钮 */
+  jadeButton: ['#4EB294', '#2E7A63'] as const,
+  /** 青瓷辉光（法阵 / 高亮） */
+  celadonGlow: ['rgba(120,178,196,0.55)', 'rgba(120,178,196,0)'] as const,
+  /** 金边 */
+  goldEdge: ['#E3CC91', '#C9A65A', '#8D7A46'] as const,
+} as const;
+
 /** LinearGradient 需要 readonly string[] */
 export const gradients = {
   plain: ['#06191B', '#0A2426', '#0B2929'] as const,
