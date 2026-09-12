@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import inspect
 import random
 from typing import TYPE_CHECKING, Optional
 
@@ -25,14 +26,24 @@ if TYPE_CHECKING:  # 只用于类型注解，运行期不导入 training
 
 
 def _load_trainer(path: str):
-    """延迟导入 C3 的 MCCFRTrainer，避免 agents <-> training 循环依赖。"""
+    """延迟导入 C3 的 MCCFRTrainer，避免 agents <-> training 循环依赖。
+
+    用 `lazy=None`（自动）载入：v2「仅策略」部署产物走**懒加载**（只留几块 bytes +
+    稀疏锚点，查表按需解码，见 §3.5），全量模型/旧模型正常展开成 dict。
+    先探测 `load()` 是否接受 `lazy`：测试替身 / 更早版本训练器的 `load(path)`
+    不带这个参数，不能因为多了个「优化开关」就把它们打挂。
+    """
     try:
         from training.trainer import MCCFRTrainer  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - 取决于 C3 是否就位
         raise ImportError(
             f"MCCFRAgent.load 需要 training.trainer.MCCFRTrainer（C3 负责），导入失败：{exc}"
         ) from exc
-    return MCCFRTrainer.load(path)
+    try:
+        accepts_lazy = "lazy" in inspect.signature(MCCFRTrainer.load).parameters
+    except (TypeError, ValueError):  # pragma: no cover - 无法内省的极端情形
+        accepts_lazy = False
+    return MCCFRTrainer.load(path, lazy=None) if accepts_lazy else MCCFRTrainer.load(path)
 
 
 class MCCFRAgent(BaseAgent):
@@ -65,6 +76,21 @@ class MCCFRAgent(BaseAgent):
     def load(cls, path: str, seed: int = 0) -> MCCFRAgent:
         return cls(_load_trainer(path), seed)
 
+    @property
+    def trainer_players(self) -> Optional[int]:
+        """模型训练时的玩家数（读不到返回 `None`）；只读，不影响 `act()` 语义。
+
+        上层用它做「模型人数 ↔ 对局人数」一致性校验：`infoset_key` 里的
+        `hand_sizes` / `alive_mask` 位宽随人数变化，2 人模型的键在 3 人局里**永不命中**。
+        """
+        config = getattr(self.trainer, "config", None)
+        players = getattr(config, "num_players", None)
+        try:
+            value = int(players)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
     # --------------------------------------------------------------- 命中率统计
 
     def reset_stats(self) -> None:
@@ -90,9 +116,21 @@ class MCCFRAgent(BaseAgent):
         legal = state.legal_actions()
         info = state.infoset_key(player)
         self.decisions_total += 1
-        if info not in self.trainer.strategy_sum and info not in self.trainer.regret_sum:
+        self.decisions_trained += 1
+        if not self._knows(info):
+            self.decisions_trained -= 1
             self.decisions_fallback += 1
             return self.fallback.act(state, player)
-        self.decisions_trained += 1
         probs = self.trainer.average_strategy(state, player)
         return sample_from_strategy(self.rng, legal, probs)
+
+    def _knows(self, info: object) -> bool:
+        """该信息集是否有训练数据。
+
+        优先用 trainer 的 `knows_key()`（v2 懒加载模型走二分 + 按需解码）；
+        trainer 替身（测试用 Stub）没有该方法时回落到直接查两张表。
+        """
+        checker = getattr(self.trainer, "knows_key", None)
+        if callable(checker):
+            return bool(checker(info))
+        return info in self.trainer.strategy_sum or info in self.trainer.regret_sum

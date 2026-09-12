@@ -1,44 +1,39 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withSequence,
-  withTiming,
-} from 'react-native-reanimated';
-
-import { useGameStore } from '@/store/game-store';
-import { colors, gradients } from '@/theme/colors';
-import { borderWidth, radius, spacing } from '@/theme/spacing';
-import { fontFamily, text } from '@/theme/typography';
-import type { EventTone } from '@/utils/event-log';
-import { presentEvent } from '@/utils/event-log';
-import { playerNameOf } from '@/utils/legal-actions';
-import { LinearGradient } from 'expo-linear-gradient';
-
-const TONE_COLORS: Record<EventTone, string> = {
-  jade: colors.jadeLight,
-  gold: colors.goldLight,
-  danger: colors.danger,
-  neutral: colors.text,
-  muted: colors.muted,
-};
-
-const TONE_FLASH: Record<EventTone, string> = {
-  jade: 'rgba(87,179,164,0.22)',
-  gold: 'rgba(201,166,90,0.26)',
-  danger: 'rgba(164,66,61,0.34)',
-  neutral: 'rgba(240,232,210,0.14)',
-  muted: 'rgba(145,166,160,0.16)',
-};
-
 /**
- * 事件动画队列播放器（FRONTEND_GUIDE §6/§7）。
+ * 事件动画队列播放器（FRONTEND_GUIDE §6/§7）—— 夜蓝青瓷配色。
  *
  * 每次提交动作后，store 把 events[] 按 seq 放进 animationQueue 并锁住输入；
  * 这里逐条播放（横幅 + 光效），播完一条调用 dequeue()，
  * 队列清空后 store 自动解锁输入 —— **动画绝不延迟后端状态**（state 早已是新状态）。
  */
+import { LinearGradient } from 'expo-linear-gradient';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
+
+import { useGameStore } from '@/store/game-store';
+import { nightColors, nightGradients } from '@/theme/colors';
+import { borderWidth, radius } from '@/theme/spacing';
+import { fontFamily } from '@/theme/typography';
+import type { EventTone } from '@/utils/event-log';
+import { presentEvent } from '@/utils/event-log';
+import { playerNameOf } from '@/utils/legal-actions';
+
+const TONE_COLORS: Record<EventTone, string> = {
+  jade: nightColors.jade,
+  gold: nightColors.cardEdge,
+  danger: nightColors.dangerText,
+  neutral: nightColors.text,
+  muted: nightColors.muted,
+};
+
+const TONE_FLASH: Record<EventTone, string> = {
+  jade: 'rgba(78,178,148,0.20)',
+  gold: 'rgba(201,166,90,0.24)',
+  danger: 'rgba(164,66,61,0.34)',
+  neutral: 'rgba(232,241,242,0.12)',
+  muted: 'rgba(143,163,173,0.16)',
+};
+
 export function EventAnimator() {
   const queue = useGameStore((state) => state.animationQueue);
   const view = useGameStore((state) => state.view);
@@ -50,10 +45,7 @@ export function EventAnimator() {
     (playerId: number | null | undefined) => playerNameOf(view, playerId),
     [view],
   );
-  const presented = useMemo(
-    () => (current ? presentEvent(current, nameOf) : null),
-    [current, nameOf],
-  );
+  const presented = useMemo(() => (current ? presentEvent(current, nameOf) : null), [current, nameOf]);
 
   const durationRef = useRef(700);
   const dequeueRef = useRef(dequeue);
@@ -66,7 +58,6 @@ export function EventAnimator() {
   const bannerScale = useSharedValue(0.9);
   const flashOpacity = useSharedValue(0);
   const [tone, setTone] = useState<EventTone>('jade');
-  const [impact, setImpact] = useState(false);
 
   const seq = current?.seq;
   const type = current?.type;
@@ -76,7 +67,6 @@ export function EventAnimator() {
     const info = presentedRef.current;
 
     setTone(info.tone);
-    setImpact(info.impact);
 
     bannerOpacity.value = 0;
     bannerScale.value = 0.9;
@@ -116,7 +106,9 @@ export function EventAnimator() {
 
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
-      <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: TONE_FLASH[tone] }, flashStyle]} />
+      <Animated.View
+        style={[StyleSheet.absoluteFill, { backgroundColor: TONE_FLASH[tone] }, flashStyle]}
+      />
 
       {type === 'TRIBULATION_DRAWN' || type === 'PLAYER_ELIMINATED' ? (
         <View pointerEvents="none" style={styles.lightningWrap}>
@@ -128,7 +120,9 @@ export function EventAnimator() {
       {type === 'TRIBULATION_DEFUSED' ? (
         <View pointerEvents="none" style={styles.talismanWrap}>
           <View style={styles.talisman}>
-            <Text style={styles.talismanGlyph}>符</Text>
+            <Text style={styles.talismanGlyph} allowFontScaling={false}>
+              符
+            </Text>
           </View>
         </View>
       ) : null}
@@ -136,14 +130,18 @@ export function EventAnimator() {
       <View pointerEvents="box-none" style={styles.centerWrap}>
         <Animated.View style={[styles.banner, { borderColor: toneColor }, bannerStyle]}>
           <LinearGradient
-            colors={gradients.modal}
+            colors={nightGradients.battle}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={styles.bannerInner}
           >
-            <Text style={[styles.title, { color: toneColor }]}>{presented.title}</Text>
-            <Text style={styles.detail}>{presented.detail}</Text>
-            <Text style={styles.counter}>
+            <Text style={[styles.title, { color: toneColor }]} numberOfLines={2} allowFontScaling={false}>
+              {presented.title}
+            </Text>
+            <Text style={styles.detail} numberOfLines={2} allowFontScaling={false}>
+              {presented.detail}
+            </Text>
+            <Text style={styles.counter} allowFontScaling={false}>
               事件 {current.seq} · 队列剩余 {queue.length - 1}
             </Text>
           </LinearGradient>
@@ -155,7 +153,9 @@ export function EventAnimator() {
           onPress={skipAnimations}
           style={styles.skip}
         >
-          <Text style={styles.skipText}>跳过动画</Text>
+          <Text style={styles.skipText} allowFontScaling={false}>
+            跳过动画
+          </Text>
         </Pressable>
       </View>
     </View>
@@ -171,50 +171,57 @@ const styles = StyleSheet.create({
     bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: 16,
   },
   banner: {
     minWidth: 220,
-    maxWidth: 420,
+    maxWidth: 360,
     borderWidth: borderWidth.thin,
     borderRadius: radius.lg,
     overflow: 'hidden',
-    backgroundColor: colors.surface,
+    backgroundColor: nightColors.surface,
   },
   bannerInner: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     alignItems: 'center',
   },
   title: {
-    ...text.heading,
-    fontSize: 20,
+    fontFamily: fontFamily.title,
+    fontSize: 18,
+    fontWeight: '700',
     textAlign: 'center',
+    letterSpacing: 2,
   },
   detail: {
-    ...text.caption,
-    marginTop: spacing.xs,
+    fontFamily: fontFamily.body,
+    fontSize: 11,
+    color: nightColors.celadonLight,
+    marginTop: 4,
     textAlign: 'center',
+    lineHeight: 16,
   },
   counter: {
-    ...text.label,
-    fontSize: 10,
-    marginTop: spacing.xs,
+    fontFamily: fontFamily.body,
+    fontSize: 9,
+    color: nightColors.muted,
+    marginTop: 4,
   },
   skip: {
-    marginTop: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
+    marginTop: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     minHeight: 44,
     justifyContent: 'center',
     borderRadius: radius.pill,
     borderWidth: borderWidth.hair,
-    borderColor: colors.border,
-    backgroundColor: 'rgba(4,18,19,0.8)',
+    borderColor: nightColors.border,
+    backgroundColor: 'rgba(7, 15, 20, 0.8)',
   },
   skipText: {
-    ...text.label,
-    color: colors.goldLight,
+    fontFamily: fontFamily.body,
+    fontSize: 11,
+    color: nightColors.celadonLight,
   },
   lightningWrap: {
     position: 'absolute',
@@ -228,7 +235,7 @@ const styles = StyleSheet.create({
   lightning: {
     width: 3,
     height: '70%',
-    backgroundColor: 'rgba(240,232,210,0.5)',
+    backgroundColor: 'rgba(245, 230, 200, 0.5)',
     marginTop: -40,
   },
   talismanWrap: {
@@ -245,14 +252,14 @@ const styles = StyleSheet.create({
     height: 132,
     borderRadius: 66,
     borderWidth: borderWidth.thick,
-    borderColor: colors.goldLight,
+    borderColor: nightColors.cardEdge,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(201,166,90,0.18)',
+    backgroundColor: 'rgba(201, 166, 90, 0.18)',
   },
   talismanGlyph: {
     fontFamily: fontFamily.title,
     fontSize: 56,
-    color: colors.goldLight,
+    color: nightColors.cardEdge,
   },
 });

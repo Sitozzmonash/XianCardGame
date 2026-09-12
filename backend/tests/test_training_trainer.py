@@ -23,6 +23,22 @@ def config_3p() -> GameConfig:
     return GameConfig(num_players=3, seed=42)
 
 
+def assert_tables_close(got: dict, expected: dict, *, rel: float = 1e-6, abs_: float = 1e-6) -> None:
+    """比较两张表：**键集合严格相等 + 数值近似**（两层，缺一不可）。
+
+    为什么不能要求精确相等：v2 落盘时值存 `float32`（`docs/INTERFACES.md` §3.5），
+    而内存里的 `dict[str, float]` 是 Python float（float64）；regret 累加若干轮后
+    出现 float32 表示不了的小数尾，逐项 `==` **必然**不成立。
+    键集合那一层是严格的，所以 1e-6 的容差不会掩盖「少 key / 多 key / 错行」这类结构缺陷。
+    """
+    assert set(got) == set(expected), "信息集键集合必须完全一致"
+    for key, row in expected.items():
+        actual = got[key]
+        assert set(actual) == set(row), f"动作集合必须完全一致：{key}"
+        for action, value in row.items():
+            assert actual[action] == pytest.approx(value, rel=rel, abs=abs_), f"数值不一致：{key} / {action}"
+
+
 def test_trainer_counts_iterations_and_traversals(config_2p: GameConfig) -> None:
     trainer = MCCFRTrainer(config_2p, seed=1, metrics_path=None)
     trainer.train(iterations=15, workers=1, log_every=100, progress=False)
@@ -141,9 +157,42 @@ def test_save_load_roundtrip(config_2p: GameConfig, tmp_path: Path) -> None:
     assert loaded.traversals_done == trainer.traversals_done
     assert loaded.exploration == 0.5
     assert loaded.seed == 9
-    assert loaded.regret_sum == trainer.regret_sum
-    assert loaded.strategy_sum == trainer.strategy_sum
+    # 结构层 + 数值层分开断言：v2 的值是 float32，精确相等不成立（见 assert_tables_close）
+    assert_tables_close(loaded.regret_sum, trainer.regret_sum)
+    assert_tables_close(loaded.strategy_sum, trainer.strategy_sum)
     assert loaded.config.num_players == 2
+
+
+def test_assert_tables_close_rejects_tampering(config_2p: GameConfig, tmp_path: Path) -> None:
+    """容差保护：1e-6 的容差不许宽到吞掉结构性错误或 1e-3 量级的篡改。"""
+    trainer = MCCFRTrainer(config_2p, seed=9, metrics_path=None)
+    trainer.train(iterations=25, workers=1, progress=False)
+    path = tmp_path / "m.pkl"
+    trainer.save(str(path))
+    loaded = MCCFRTrainer.load(str(path))
+
+    # 1) 真实数据：比较逻辑本身必须通过
+    assert_tables_close(loaded.regret_sum, trainer.regret_sum)
+    assert_tables_close(loaded.strategy_sum, trainer.strategy_sum)
+
+    # 2) 篡改单个数值（+1e-3，远大于 float32 尾差）→ 必须被发现
+    key = next(iter(loaded.regret_sum))
+    action = next(iter(loaded.regret_sum[key]))
+    tampered = {info: dict(row) for info, row in loaded.regret_sum.items()}
+    tampered[key][action] += 1e-3
+    with pytest.raises(AssertionError):
+        assert_tables_close(tampered, trainer.regret_sum)
+
+    # 3) 篡改结构（少一个动作 / 多一个信息集）→ 也必须被发现
+    shrunken = {info: dict(row) for info, row in loaded.regret_sum.items()}
+    shrunken[key].pop(action)
+    with pytest.raises(AssertionError):
+        assert_tables_close(shrunken, trainer.regret_sum)
+
+    extra = dict(loaded.regret_sum)
+    extra[("bogus", "key")] = {action: 1.0}
+    with pytest.raises(AssertionError):
+        assert_tables_close(extra, trainer.regret_sum)
 
 
 def test_save_creates_parent_dir(config_2p: GameConfig, tmp_path: Path) -> None:

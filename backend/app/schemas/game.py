@@ -70,6 +70,7 @@ class AgentRequest(BaseModel):
 
         {"type": "ismcts", "simulations": 500, "exploration": 1.4, "max_depth": 250}
         {"type": "mccfr", "model": "models/x.pkl"}  /  {"type": "mccfr", "path": "..."}
+        {"type": "mccfr", "id": "mccfr_2p_10k"}     # 直接用 GET /agents 的模型 id
         {"type": "rule"} / {"type": "random"}
     """
 
@@ -81,6 +82,9 @@ class AgentRequest(BaseModel):
     max_depth: Optional[int] = Field(default=None, ge=1)
     model: Optional[str] = None
     path: Optional[str] = None
+    #: `GET /agents` 返回的模型条目 id（前端天然发 id 而不是路径，由 ModelRegistry 解析成路径）
+    id: Optional[str] = None
+    model_id: Optional[str] = None
 
     def to_spec(self) -> dict:
         """转成 `agent_factory.build_agent` 认识的 dict（丢掉 None）。"""

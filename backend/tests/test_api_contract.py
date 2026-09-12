@@ -63,7 +63,11 @@ def test_agents_schema(client):
     assert {"random", "rule", "ismcts"} <= ids
 
     for entry in agents:
-        assert set(entry) <= {"id", "name", "type", "configurable", "defaults", "model"}
+        assert set(entry) <= {
+            "id", "name", "type", "configurable", "defaults", "model",
+            # MCCFR 模型条目额外带 players/iterations：模型按人数训练，前端据此过滤
+            "players", "iterations",
+        }
         assert isinstance(entry["id"], str) and entry["id"]
         assert isinstance(entry["name"], str) and entry["name"]
         assert entry["type"] in {"random", "rule", "ismcts", "mccfr"}
@@ -104,6 +108,10 @@ def test_agents_lists_models_from_index(client, monkeypatch):
         "type": "mccfr",
         "configurable": False,
         "model": "models/mccfr_2p_10k.pkl",
+        # 模型按人数训练（信息集键含 hand_sizes 长度与 alive_mask 位宽，跨人数不可复用）：
+        # 这两个字段是前端「按所选人数过滤模型」的依据。
+        "players": 2,
+        "iterations": 10000,
     }
 
 
@@ -526,6 +534,9 @@ def test_model_registry_reads_index_and_caches(tmp_path):
             "type": "mccfr",
             "configurable": False,
             "model": "models/mccfr_2p_10k.pkl",
+            # index.json 里给了 players/iterations 就必须透出（前端按人数过滤模型）
+            "players": 2,
+            "iterations": 10000,
         }
     ]
 

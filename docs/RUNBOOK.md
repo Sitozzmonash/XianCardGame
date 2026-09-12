@@ -45,21 +45,47 @@ cd ../frontend && npm start              # 按 w 开 Web，或用 Expo Go 扫码
 
 ## 2. 训练 MCCFR
 
+> 用 `uv` 的话把 `"$PY"` 换成 `uv run --with-requirements requirements.txt python` 即可（PowerShell 同样适用，命令保持单行不要加续行符）。
+
+### 2.0 ⚠ 模型是「按玩家人数」训练的（必须先知道）
+
+信息集 key 里包含 `hand_sizes`（长度 = 人数）与 `alive_mask`（N 位掩码），所以
+**2 人模型放进 3 人局，命中率恒为 0%、100% 回落 RuleAgent**（实测：468 次决策 0 命中，且不会报错）。
+`battle` / `benchmark` 会打印中文警告；训练出的模型请按下表分别保存：
+
+| 玩家人数 | 输出文件名 |
+|---|---|
+| 2 人 | `models/mccfr_2p_10k.pkl` |
+| 3 人 | `models/mccfr_3p_10k.pkl` |
+| 4/5/6 人 | `models/mccfr_4p_20k.pkl` / `mccfr_5p_20k.pkl` / `mccfr_6p_20k.pkl` |
+
 ### 2.1 先跑单进程（严格算法基线）
 
 ```bash
 "$PY" main.py train --players 2 --iterations 10000 --workers 1 --out models/mccfr_2p_10k.pkl
 ```
 
-实测（本机 12 核，2 人）：**10,000 迭代 ≈ 2 分 23 秒**（持续约 70 iter/s；前期 300+ iter/s，随信息集变多而下降）。
-产出：433,819 个信息集 / 1,177,036 条策略条目。
+实测（本机 12 核，2 人）：**10,000 迭代 ≈ 2 分 12 秒**（持续约 85 iter/s），
+产出 433,819 个信息集 / 1,177,036 条策略条目，模型 23.20 MB（v2 格式）。
 
 ### 2.2 多进程加速（工程用，不是严格基线）
 
 ```bash
-"$PY" main.py train --players 3 --iterations 100000 --workers 8 --sync-batch 1000 \
-  --out models/mccfr_3p_100k.pkl
+# 4 人（实测 workers=8：末段约 74 iter/s，500 迭代 11 秒）
+"$PY" main.py train --players 4 --iterations 20000 --workers 8 --sync-batch 1000 \
+  --checkpoint-every 5000 --log-every 1000 --out models/mccfr_4p_20k.pkl
+
+# 5 人
+"$PY" main.py train --players 5 --iterations 20000 --workers 8 --sync-batch 1000 \
+  --checkpoint-every 5000 --log-every 1000 --out models/mccfr_5p_20k.pkl
+
+# 6 人（实测 workers=8：末段约 28 iter/s，500 迭代 32 秒；每迭代更贵，traversals = 迭代数 × 人数）
+"$PY" main.py train --players 6 --iterations 20000 --workers 8 --sync-batch 1000 \
+  --checkpoint-every 5000 --log-every 1000 --out models/mccfr_6p_20k.pkl
 ```
+
+预估耗时（会随表变大而变慢）：4 人 ≈ 10~15 分钟、5 人 ≈ 15~25 分钟、6 人 ≈ 25~40 分钟。
+**一次只跑一个**（每个都占 8 核）。进度行里的 `平均=xx iter/s` 就是实时速率，用 `剩余迭代 ÷ 该速率` 估剩余时间。
 
 `workers>1` 是**批量同步的近似并行**（各 worker 拿同一份 regret 快照训练一小批再合并）。
 做论文级对照实验请用 `--workers 1`。
@@ -108,13 +134,17 @@ CLI 参数优先于 YAML。训练日志：中文进度打到终端，机器可�
 
 | 表示 | 体积 | 每信息集 | 说明 |
 |---|---|---|---|
-| 旧 `repr(str)` 字符串 key | 124.0 MB | 286 B | 参考实现产出的原生模型（118.2 MiB） |
-| 紧凑 tuple key | 102.5 MB | 236 B | 只换 key 编码 |
-| 紧凑 tuple + 动作 key 字符串池化 | **61.2 MB** | 121 B | 当前最好（是旧版的 2.0x 压缩） |
+| 旧 `repr(str)` 字符串 key | 118.21 MB | 285.7 B | 参考实现产出的原生模型（v1） |
+| 紧凑 tuple key | 97.76 MB | 236.3 B | 只换 key 编码 |
+| 紧凑 tuple + 动作 key 字符串池化 | 64.81 MB | 156.6 B | 仍是一堆 Python dict |
+| **v2 紧凑二进制（全量）** | **19.52 MB** | **47.2 B** | regret + 平均策略都存，**可续训**；载入 4.34 s |
+| **v2 紧凑二进制（仅策略）** | **15.95 MB** | **38.5 B** | 部署产物，不可续训；载入 3.14 s、**懒加载 0.01 s** |
 
 **瓶颈在行数据**：中文动作 key 字符串 + Python `float` 对象 + dict 槽位占了 60% 以上。
-只要还用 `dict[tuple, dict[str, float]]`，地板约 40~50 MB。要再往下压必须换存储表示
-（动作 int 化 + 数组打包，见 `docs/INTERFACES.md` §3.5 的 v2 二进制格式）。
+只要还用 `dict[tuple, dict[str, float]]`，地板约 40~50 MB。v2 换了存储表示（key 打包成
+≤32 字节的 blob、动作 int 化、值 float32、部署态只存平均策略）后做到 **118 MB → 15.95 MB（约 7.4x）**，
+且支持**懒加载**——不需要把整表展开成 Python dict，这对内存受限的部署环境（如 Render 免费档 512MB）很关键。
+实测：同一张表 v2 全量 19.52 MB / 每信息集 47.2 B；本机 10K 训练产物 23.20 MB / 56.1 B。
 
 **规模预警（务必先看）**：
 
@@ -124,6 +154,19 @@ CLI 参数优先于 YAML。训练日志：中文进度打到终端，机器可�
 
 旧模型兼容：参考实现那份 118.2 MB 的旧模型可**直接载入 + 迁移**（603,504 个 key，0 失败，
 耗时 66~72 秒），迁移是双射映射，所以旧模型能**真正参与推理**而不只是回落。
+
+### 3.1 刷新模型清单（前端要用）
+
+前端「对战配置 / AI 实验室」的 MCCFR 模型列表来自 `GET /agents`，它读 `backend/models/index.json`。
+训练完记得刷新（否则界面看不到新模型）：
+
+```bash
+"$PY" main.py models --write-index     # 扫描 models/*.pkl 生成/更新 index.json
+"$PY" main.py models                   # 只读列出：格式 / 玩家数 / 迭代数 / 信息集 / 体积 / 能否加载
+```
+
+`index.json` 每条记录带 `players`，前端据此**按所选人数过滤**（`GET /agents` 的模型条目也会透出
+`players` / `iterations`）——避免把 2 人模型选进 3 人局。
 
 ---
 

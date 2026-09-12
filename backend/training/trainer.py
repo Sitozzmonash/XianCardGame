@@ -39,6 +39,7 @@ from game import Action, GameConfig, GameState
 from game.cards import CARD_ORDER, CARD_TO_INDEX, Card
 from game.state import PHASE_ORDER, PHASE_TO_INDEX
 
+from . import codec
 from ._table import merge_nested, table_size
 from .logging_utils import DEFAULT_METRICS_PATH, append_metric, format_duration, log_info
 from .parallel import mccfr_worker, split_batch
@@ -226,6 +227,13 @@ class MCCFRTrainer:
         #: 迁移统计（旧模型加载时填充）
         self.migrated_keys: int = 0
         self.unmigrated_keys: int = 0
+
+        #: v2 **懒加载**视图（`load(..., lazy=True)` 时填充）。非 None 时：
+        #: 两张表保持为空（**不展开任何 Python dict**），查表走 `codec.PackedModel`
+        #: 的二分 + 按需解码。见 `docs/INTERFACES.md` §3.5 与 `training/codec.py`。
+        self._packed: Optional[codec.PackedModel] = None
+        #: 懒加载时的原始 v2 容器（重新 save 时原样写回，不做二次编解码）
+        self._packed_data: Optional[dict] = None
 
         self._elapsed_total: float = 0.0
         self._run_started_at: Optional[float] = None
@@ -658,6 +666,18 @@ class MCCFRTrainer:
 
     # ------------------------------------------------------------------ 推理 / 统计
 
+    def _rows_for(self, info: object) -> tuple[dict[str, float], dict[str, float]]:
+        """取一个信息集的两行：`(后悔行, 平均策略权重行)`；不存在时返回两个空 dict。
+
+        懒加载（v2 `strategy_only` 部署产物）时按需解码**只解这一行**，不展开整表。
+        """
+        if self._packed is not None:
+            found = self._packed.lookup(info)
+            if found is None:
+                return {}, {}
+            return found
+        return self.regret_sum.get(info, {}), self.strategy_sum.get(info, {})
+
     def average_strategy(self, state: GameState, player: int) -> dict[str, float]:
         """按当前局面给出 `player` 的平均策略（`action.key() -> 概率`）。
 
@@ -665,22 +685,65 @@ class MCCFRTrainer:
         """
         legal = state.legal_actions()
         info = state.infoset_key(player)
-        sums = self.strategy_sum.get(info, {})
+        regrets, sums = self._rows_for(info)
         values = {action.key(): max(0.0, sums.get(action.key(), 0.0)) for action in legal}
         total = sum(values.values())
         if total <= 1e-15:
-            regrets = self.regret_sum.get(info, {})
             return regret_matching(regrets, legal)
         return {key: value / total for key, value in values.items()}
 
     def knows_infoset(self, state: GameState, player: int) -> bool:
         """该信息集是否出现在训练表里（MCCFRAgent 用它决定是否回落 RuleAgent）。"""
-        info = state.infoset_key(player)
+        return self.knows_key(state.infoset_key(player))
+
+    def knows_key(self, info: object) -> bool:
+        """信息集 key 是否在表里（懒加载模型走「二分 + 按需解码」）。"""
+        if self._packed is not None:
+            return self._packed.lookup(info) is not None
         return info in self.regret_sum or info in self.strategy_sum
+
+    @property
+    def lazy(self) -> bool:
+        """是否是懒加载（v2 部署产物）：表未展开成 Python dict。"""
+        return self._packed is not None
+
+    @property
+    def strategy_infoset_count(self) -> int:
+        """平均策略表规模 = **推理时真正能查表的信息集数**。
+
+        这是 `MCCFRAgent` 的实际覆盖面：命中率统计的分母就是它。
+        """
+        if self._packed is not None:
+            return self._packed.n_infosets
+        return len(self.strategy_sum)
+
+    @property
+    def regret_infoset_count(self) -> int:
+        """后悔表规模。
+
+        与 `strategy_infoset_count` **可能不等**：outcome sampling 只在某玩家当
+        update-player 时写他的 regret，而策略表覆盖所有被访问到的信息集。
+        参考实现的旧模型就是这个形态（regret 169,634 / strategy 433,870）：
+        差值不影响推理，只是训练期写表策略不同，**不是缺陷**。
+        """
+        if self._packed is not None:
+            return 0 if self._packed.strategy_only else self._packed.n_infosets
+        return len(self.regret_sum)
+
+    @property
+    def infoset_count(self) -> int:
+        """信息集数（**推理覆盖口径**，等价于 `strategy_infoset_count`）。
+
+        刻意与 regret 表口径分开：推理/部署只关心「策略表覆盖了多少信息集」。
+        两个口径可能不等（旧格式模型），要 regret 表规模请用 `regret_infoset_count`。
+        """
+        return self.strategy_infoset_count
 
     @property
     def policy_size(self) -> int:
         """策略条目数 = `sum(len(row) for row in strategy_sum.values())`（spec §56）。"""
+        if self._packed is not None:
+            return self._packed.n_strategy_entries or table_size(self.strategy_sum)
         return table_size(self.strategy_sum)
 
     @property
@@ -695,8 +758,9 @@ class MCCFRTrainer:
         return {
             "iterations": self.iterations_done,
             "traversals": self.traversals_done,
-            "infosets": len(self.regret_sum),
-            "strategy_infosets": len(self.strategy_sum),
+            "infosets": self.strategy_infoset_count,
+            "strategy_infosets": self.strategy_infoset_count,
+            "regret_infosets": self.regret_infoset_count,
             "policy_size": self.policy_size,
             "iter_per_sec": self.iterations_done / elapsed,
             "traversals_per_sec": self.traversals_done / elapsed,
@@ -741,25 +805,127 @@ class MCCFRTrainer:
             "stats": self.stats(),
         }
 
-    def save(self, path: str) -> None:
-        """保存模型（`pickle.HIGHEST_PROTOCOL`）。"""
+    def _strategy_table_for_deployment(self) -> dict:
+        """部署产物（`strategy_only`）用的策略表：把「平均策略权重全 0」的信息集换成退路策略。
+
+        为什么必须换：outcome sampling 下有些信息集只被对手采样到，权重永远是 0；
+        `average_strategy()` 在全量模型上对这些信息集会**回退到 regret matching**。
+        部署产物没有后悔表可回退，不换就会退化成均匀随机 —— 那与训练模型的行为不一致，
+        而且恰好是最需要「像训练过一样」的局面。
+        """
+        out: dict = {}
+        for info, row in self.strategy_sum.items():
+            if sum(value for value in row.values() if value > 0.0) > 1e-15:
+                out[info] = row
+                continue
+            regrets = self.regret_sum.get(info) or {}
+            positive = {key: value for key, value in regrets.items() if value > 0.0}
+            total = sum(positive.values())
+            # `regret_matching` 的语义：正后悔值归一化；全非正则在行内均匀。
+            # 信息集的行就是它的合法动作集合，所以这里可以脱开 state 直接算。
+            out[info] = (
+                {key: value / total for key, value in positive.items()}
+                if total > 1e-15
+                else {key: 1.0 / len(row) for key in row} if row else row
+            )
+        return out
+
+    def to_container(self, strategy_only: bool = False) -> dict:
+        """构造 v2 扁平容器（§3.5：只含 bytes / int / float / str / list / dict）。
+
+        - 懒加载模型：直接复用载入时的容器（必要时把 regret 块丢掉派生出「仅策略」）；
+        - 普通模型：把两张表压成 `key_blob` / `regret_blob` / `strategy_blob`。
+        """
+        if self._packed is not None:
+            data = dict(self._packed_data or {})
+            if strategy_only and not data.get("strategy_only"):
+                return codec.as_strategy_only(data)
+            return data
+        strategy_table = self._strategy_table_for_deployment() if strategy_only else self.strategy_sum
+        return codec.build_container(
+            self.regret_sum,
+            strategy_table,
+            config=asdict(self.config),
+            seed=self.seed,
+            exploration=self.exploration,
+            iterations_done=self.iterations_done,
+            traversals_done=self.traversals_done,
+            strategy_only=bool(strategy_only),
+        )
+
+    def save(self, path: str, strategy_only: bool = False, format: str = "v2") -> None:
+        """保存模型（`pickle.HIGHEST_PROTOCOL`）。
+
+        - `format="v2"`（默认，§3.5）：紧凑二进制扁平容器，全量 ≤30 MB / 仅策略 ≤20 MB；
+        - `format="v1"`：旧的 plain dict（紧凑 tuple key + 池化动作 key），
+          给需要旧格式的第三方工具；`strategy_only` 对 v1 无意义（忽略）。
+        - `strategy_only=True`：只写平均策略（部署产物，`MCCFRAgent` 可直接推理）。
+          注意：平均策略权重全 0 的信息集会写入**按后悔值归一化的退路策略**
+          （见 `_strategy_table_for_deployment`），保证部署模型与全量模型的
+          `average_strategy()` 行为一致（否则那些局面会退化成均匀随机）。
+
+        签名向后兼容：`save(path)` 仍可用，只是现在默认写 v2。
+        """
+        fmt = str(format or "v2").strip().lower()
+        if fmt in ("v1", "legacy", "dict", "compact-tuple"):
+            if self._packed is not None:
+                raise ValueError("懒加载的 v2 模型无法写成 v1（表未展开）；请先用 lazy=False 载入。")
+            self.intern_tables()
+            payload: dict = self.to_payload()
+        elif fmt in ("v2", "packed", "packed-v2", "binary", "bin"):
+            payload = self.to_container(strategy_only=bool(strategy_only))
+        else:
+            raise ValueError(f"未知的模型格式：{format}（可选 v2 / v1）")
+
         target = Path(path)
         if str(target.parent) not in ("", "."):
             target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as handle:
-            pickle.dump(self.to_payload(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def model_summary(self, size_bytes: int = 0) -> dict:
+        """模型自描述（`main.py models` / 汇报用）。"""
+        return {
+            "format_version": FORMAT_VERSION,
+            "encoding": codec.ENCODING,
+            "lazy": self.lazy,
+            "strategy_only": bool(self._packed.strategy_only) if self._packed is not None else False,
+            "players": self.config.num_players,
+            "iterations_done": self.iterations_done,
+            "traversals_done": self.traversals_done,
+            "n_infosets": self.infoset_count,
+            "n_entries": self.policy_size,
+            "size_bytes": int(size_bytes),
+        }
 
     @classmethod
-    def load(cls, path: str, migrate_legacy: bool = True) -> "MCCFRTrainer":
-        """读模型；**兼容参考实现的旧格式**（字符串 key，无 `format_version`）。
+    def load(
+        cls,
+        path: str,
+        migrate_legacy: bool = True,
+        lazy: Optional[bool] = False,
+    ) -> "MCCFRTrainer":
+        """读模型；支持三代输入，行为一致：
 
-        `migrate_legacy=True`（默认）时把旧字符串 key 翻译成紧凑 tuple key，
-        这样旧模型可以直接参与推理；失败的 key 原样保留，保证不丢数据。
+        1. 旧的 plain dict（`repr(str)` 字符串 key，参考实现 124 MB 模型）；
+        2. 紧凑 tuple key 的 plain dict（v1）；
+        3. v2 紧凑二进制扁平容器（`encoding="packed-v2"`）。
+
+        读到 1/2 时按 v1 处理（`migrate_legacy=True` 会把字符串 key 无损翻译成紧凑
+        tuple），读到的模型都能继续训练（续训）。
+
+        `lazy`：是否用**懒加载**（只留几块 bytes + 稀疏锚点，查表按需解码）。
+        - `False`（默认）：展开成 `dict[tuple, dict[str, float]]`，训练 / 续训用；
+        - `True`：不展开，适合部署推理（Render 512 MB 内存）；
+        - `None`：自动——`strategy_only` 模型懒加载，全量模型展开。
         """
         with open(path, "rb") as handle:
             data = pickle.load(handle)
         if not isinstance(data, dict):  # pragma: no cover - 防御
             raise ValueError(f"模型文件格式无法识别：{path}")
+
+        if codec.is_v2_container(data):
+            return cls._from_container(data, lazy=lazy)
 
         config_dict = dict(data.get("config") or {})
         config_dict.pop("num_player", None)  # 容忍历史字段
@@ -789,6 +955,63 @@ class MCCFRTrainer:
         trainer.intern_tables()
         return trainer
 
+    @classmethod
+    def _from_container(cls, data: Mapping[str, Any], lazy: Optional[bool] = False) -> "MCCFRTrainer":
+        """从 v2 容器构造训练器（`lazy=True` 时不展开表）。"""
+        config_dict = dict(data.get("config") or {})
+        config_dict.pop("num_player", None)
+        trainer = cls(
+            GameConfig(**config_dict),
+            seed=int(data.get("seed", 0) or 0),
+            exploration=float(data.get("exploration", 0.6) or 0.6),
+            metrics_path=None,
+        )
+        trainer.iterations_done = int(data.get("iterations_done", 0) or 0)
+        trainer.traversals_done = int(data.get("traversals_done", 0) or 0)
+
+        packed = codec.PackedModel(data)
+        codec.register_action_table(packed.action_table)
+        use_lazy = packed.strategy_only if lazy is None else bool(lazy)
+        if use_lazy:
+            trainer._packed = packed
+            trainer._packed_data = data
+            log_info(
+                f"已懒加载 v2 模型：信息集 {packed.n_infosets:,}（未展开成 Python dict）"
+                f"{'，仅含平均策略' if packed.strategy_only else ''}"
+            )
+            return trainer
+
+        regret_sum, strategy_sum = codec.unpack_tables(data)
+        trainer.regret_sum = regret_sum
+        trainer.strategy_sum = strategy_sum
+        # 动作字符串池化（与 v1 载入后一致）：后续 save / 续训都复用同一批 str 对象。
+        for name in packed.action_table:
+            trainer._action_key_pool[name] = name
+        log_info(
+            f"已载入 v2 模型：信息集 {len(regret_sum):,} / 策略表 {len(strategy_sum):,}"
+            f"{'（仅含平均策略）' if packed.strategy_only else ''}"
+        )
+        return trainer
+
+
+def peek_model_players(path: str) -> Optional[int]:
+    """只读模型元信息，返回**训练时的玩家数**；读不到返回 `None`。
+
+    走 `codec.peek_model_header`（v2 容器只读头部，不展开几十 MB 的 blob），
+    用于上层做「模型人数 ↔ 对局人数」一致性校验，避免用户把 2 人模型用进 3 人局
+    （信息集键空间不重叠 → 命中率恒为 0，MCCFR 实际由 RuleAgent 代打）却毫无提示。
+    """
+    header = codec.peek_model_header(path)
+    config = header.get("config")
+    if not isinstance(config, dict):  # pragma: no cover - 防御
+        return None
+    players = config.get("num_players") or config.get("players")
+    try:
+        value = int(players)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
 
 def _migrate_table(table: Mapping) -> tuple[dict, int, int]:
     """迁移一张表的所有 key，返回 `(新表, 成功数, 失败数)`。
@@ -817,4 +1040,5 @@ __all__ = [
     "INFOSET_FORMAT",
     "migrate_legacy_key",
     "LEGACY_KEY_MIGRATOR",
+    "peek_model_players",
 ]

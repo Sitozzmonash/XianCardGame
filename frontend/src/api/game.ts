@@ -114,13 +114,12 @@ function normalizeLegalAction(raw: unknown): LegalAction {
 
 function normalizeEvent(raw: unknown, index: number): GameEvent {
   const value = (raw ?? {}) as Partial<GameEvent>;
+  // 线上契约只有 seq/type/actor/data 四键（backend/app/services/events.py:render_event）。
+  // 顶层 target/card_id/message 曾经在此映射，但后端从不发送 —— 已删除，避免下游误读。
   return {
     seq: asNumber(value.seq, index + 1),
     type: (value.type ?? 'TURN_STARTED') as GameEvent['type'],
     actor: value.actor ?? null,
-    target: value.target ?? null,
-    card_id: value.card_id ?? null,
-    message: value.message ?? null,
     data: value.data ?? null,
   };
 }

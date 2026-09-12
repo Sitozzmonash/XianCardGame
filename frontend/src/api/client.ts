@@ -2,7 +2,7 @@
  * 统一 HTTP 客户端（铁律 2：页面里不允许直接 fetch，必须经过这里）。
  *
  * base URL：EXPO_PUBLIC_API_BASE_URL，缺省 http://localhost:8000/api/v1
- * mock 开关：EXPO_PUBLIC_USE_MOCK（'1'/'true' → 使用 src/api/mock.ts；缺省 = 打开）
+ * mock 开关：EXPO_PUBLIC_USE_MOCK（'1'/'true'/'yes' → 使用 src/api/mock.ts；缺省 = 走真后端）
  *
  * 注意：Expo CLI 只在构建期静态替换 `process.env.EXPO_PUBLIC_*` 字面量，
  * 因此下面必须写成静态成员访问，不能写 process.env[key]。

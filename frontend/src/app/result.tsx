@@ -4,21 +4,27 @@ import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ScreenBackground } from '@/components/layout/ScreenBackground';
+import { ResultActions, ResultBadge, ResultRanking, ResultStatBlock, rankingOf, resultStatsOf } from '@/components/result';
 import { Badge } from '@/components/ui/Badge';
 import { Banner } from '@/components/ui/Banner';
-import { Panel } from '@/components/ui/Panel';
-import { PrimaryButton } from '@/components/ui/PrimaryButton';
 import { useGameStore } from '@/store/game-store';
 import { colors } from '@/theme/colors';
-import { borderWidth, radius, spacing } from '@/theme/spacing';
+import { spacing } from '@/theme/spacing';
 import { fontFamily, text } from '@/theme/typography';
 
+/**
+ * 「天劫试炼 · 结算」（fig4_1 1:1，墨玉色板）
+ *   小标题「天劫试炼」→ 主文案「渡劫成功 / 渡劫失败」→ 圆形徽记 + 胜者名 + 「最后存活 · 证道成功」
+ *   → 统计三列（回合 / 出牌 / 渡劫）→ 最终名次列表 → 「再来一局」/「返回主页」。
+ * 所有数值取自真实 GameView；拿不到的指标显示「—」，绝不编造胜者或数据。
+ */
 export default function ResultScreen() {
   const view = useGameStore((state) => state.view);
   const setup = useGameStore((state) => state.setup);
   const createGame = useGameStore((state) => state.createGame);
   const clearGame = useGameStore((state) => state.clearGame);
   const isSubmitting = useGameStore((state) => state.isSubmitting);
+  const battleLog = useGameStore((state) => state.battleLog);
   const error = useGameStore((state) => state.error);
   const clearError = useGameStore((state) => state.clearError);
 
@@ -30,35 +36,33 @@ export default function ResultScreen() {
 
   if (!view) {
     return (
-      <ScreenBackground variant="home" contentStyle={styles.content}>
+      <ScreenBackground variant="plain" contentStyle={styles.emptyContent}>
         <Head>
           <title>对局结算 · 修仙卡牌</title>
         </Head>
         <View style={styles.emptyWrap}>
-          <Text style={styles.eyebrow}>尚无结算数据</Text>
-          <Text style={styles.subline}>请先开始一局试炼。</Text>
-          <View style={styles.actions}>
-            <PrimaryButton label="返回首页" variant="gold" onPress={() => router.replace('/')} />
-          </View>
+          <Text style={styles.eyebrow}>天劫试炼</Text>
+          <Text style={styles.emptyTitle}>尚无结算数据</Text>
+          <Text style={styles.emptyHint}>请先开始一局试炼。</Text>
+          <ResultActions onRestart={() => router.replace('/setup')} onHome={() => router.replace('/')} />
         </View>
       </ScreenBackground>
     );
   }
 
-  const viewerId = view.viewer_player_id;
-  const players = view.public.players;
-  const winnerId = typeof view.winner === 'number' ? view.winner : null;
-  const winner = players.find((player) => player.player_id === winnerId);
-  const me = players.find((player) => player.player_id === viewerId);
-  const iWon = winnerId === viewerId;
-  const draw = winnerId === null || winnerId === undefined || winnerId < 0;
+  const winnerId = typeof view.winner === 'number' && view.winner >= 0 ? view.winner : null;
+  const winner = view.public.players.find((player) => player.player_id === winnerId);
+  const iWon = winnerId !== null && winnerId === view.viewer_player_id;
+  const ended = view.status === 'ended' || view.phase === 'ENDED';
 
-  const headline = draw ? '天机未定' : iWon ? '证得长生' : '道消身殒';
-  const subline = draw
-    ? '本局以平局收场（forced stop 或同时陨落）'
-    : iWon
-      ? '你在天劫试炼中活到了最后'
-      : `${winner?.name ?? `P${winnerId}`} 活到了最后`;
+  const headline = winnerId === null ? '天机未定' : iWon ? '渡劫成功' : '渡劫失败';
+  const winnerName = winner?.name ?? (winnerId === null ? '无人生还' : `P${winnerId}`);
+  const subtitle =
+    winnerId === null ? '本局平局 · 无胜者' : iWon ? '最后存活 · 证道成功' : `${winnerName} 最后存活 · 证道成功`;
+
+  const stats = resultStatsOf({ view, log: battleLog });
+  const ranking = rankingOf(view);
+  const me = view.public.players.find((player) => player.player_id === view.viewer_player_id);
 
   const restart = async () => {
     setStarting(true);
@@ -68,104 +72,58 @@ export default function ResultScreen() {
   };
 
   return (
-    <ScreenBackground variant="home" contentStyle={styles.content}>
+    <ScreenBackground variant="plain" scroll contentStyle={styles.content}>
       <Head>
         <title>对局结算 · 修仙卡牌</title>
       </Head>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <Text style={styles.eyebrow}>天劫试炼 · 终局</Text>
-        <Text style={[styles.headline, iWon ? styles.win : draw ? null : styles.lose]}>
+
+      <View style={styles.inner} testID="result-screen">
+        {/* 小标题：设计 y 38-50，左对齐 x 28.5 */}
+        <Text style={styles.eyebrow}>天劫试炼</Text>
+
+        {/* 主文案：设计 y 69.5-119.5，居中，字号 ≈44 */}
+        <Text
+          style={[styles.headline, iWon ? styles.headlineWin : winnerId === null ? null : styles.headlineLose]}
+          testID="result-headline"
+        >
           {headline}
         </Text>
-        <Text style={styles.subline}>{subline}</Text>
 
         <Banner message={error} onDismiss={clearError} />
 
-        <View style={styles.badgeRow}>
-          <Badge label={`revision ${view.revision}`} tone="muted" />
-          <Badge label={`状态 ${view.status}`} tone="neutral" />
-          {view.forced_stop ? <Badge label="forced stop" tone="danger" /> : null}
-          <Badge label={`第 ${view.public.round} 回合`} tone="jade" />
-        </View>
-
-        <Panel title="玩家结果" style={styles.panel}>
-          {players.map((player) => {
-            const isWinner = player.player_id === winnerId;
-            return (
-              <View
-                key={player.player_id}
-                style={[styles.row, isWinner ? styles.rowWin : null]}
-              >
-                <Text style={styles.rowName}>
-                  {player.name}
-                  {player.player_id === viewerId ? '（你）' : ''}
-                </Text>
-                <View style={styles.rowRight}>
-                  <Badge
-                    label={player.alive ? '存活' : '已淘汰'}
-                    tone={player.alive ? 'jade' : 'danger'}
-                  />
-                  {isWinner ? <Badge label="胜者" tone="gold" /> : null}
-                </View>
-              </View>
-            );
-          })}
-        </Panel>
-
-        <Panel title="本局设置" style={styles.panel}>
-          <Text style={styles.settingLine}>人数：{setup.players}</Text>
-          <Text style={styles.settingLine}>
-            座位 AI：{setup.agentTypes.slice(0, setup.players).join(' / ')}
-          </Text>
-          <Text style={styles.settingLine}>
-            ISMCTS simulations：{setup.ismctsSimulations}
-          </Text>
-          <Text style={styles.settingLine}>Seed：{setup.seed.trim() || '服务端随机'}</Text>
-        </Panel>
-
-        {me && !me.alive ? (
-          <Text style={styles.footnote}>
-            你已被淘汰：抽到【天劫】且手中没有【护劫符】（规则由后端裁决）。
-          </Text>
+        {!ended ? (
+          <View style={styles.noticeRow}>
+            <Badge label={`对局状态 ${view.status}`} tone="muted" />
+            <Text style={styles.noticeText}>本局尚未结束，以下为当前实时局面。</Text>
+          </View>
         ) : null}
 
-        <View style={styles.actions}>
-          <PrimaryButton
-            label="再来一局"
-            variant="gold"
-            glyph="炼"
-            loading={starting || isSubmitting}
-            disabled={starting || isSubmitting}
-            onPress={() => void restart()}
-            testID="result-restart"
-          />
-          <View style={styles.actionRow}>
-            <View style={styles.actionItem}>
-              <PrimaryButton
-                label="重新设置"
-                variant="jade"
-                onPress={() => {
-                  clearGame();
-                  router.replace('/setup');
-                }}
-              />
-            </View>
-            <View style={styles.actionItem}>
-              <PrimaryButton label="卡牌图鉴" variant="ghost" onPress={() => router.push('/cards')} />
-            </View>
-          </View>
-          <PrimaryButton
-            label="返回首页"
-            variant="ghost"
-            onPress={() => {
-              clearGame();
-              router.replace('/');
-            }}
-          />
-        </View>
+        {/* 徽记 + 胜者名 + 副标题（设计 y 171-413） */}
+        <ResultBadge name={winnerName} subtitle={subtitle} />
 
-        <Text style={styles.footer}>胜负、淘汰与结束全部由后端权威裁定，前端仅展示。</Text>
-      </ScrollView>
+        {/* 统计三列（设计 y 448-563.5） */}
+        <ResultStatBlock stats={stats} />
+
+        {/* 最终排名（设计标题 y 596-610 + 行 y 628-792） */}
+        <Text style={styles.sectionTitle}>最终排名</Text>
+        <ResultRanking players={ranking} />
+
+        <View style={styles.spacer} />
+
+        <ResultActions
+          onRestart={() => void restart()}
+          onHome={() => {
+            clearGame();
+            router.replace('/');
+          }}
+          restarting={starting || isSubmitting}
+        />
+
+        <Text style={styles.footnote}>
+          回合 / 出牌取自 GameView.public（round、discard_count）；渡劫取自本局事件流中的 TRIBULATION_*
+          事件；胜负与淘汰全部由后端裁定。{me && !me.alive ? ' 你已被淘汰。' : ''}
+        </Text>
+      </View>
     </ScreenBackground>
   );
 }
@@ -174,102 +132,84 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
   },
+  emptyContent: {
+    flex: 1,
+  },
+  inner: {
+    width: '100%',
+    flexGrow: 1,
+    paddingHorizontal: 12,
+    paddingTop: 38,
+    paddingBottom: 4,
+  },
+  eyebrow: {
+    fontFamily: fontFamily.body,
+    fontSize: 13,
+    letterSpacing: 4,
+    color: colors.goldLight,
+  },
+  headline: {
+    fontFamily: fontFamily.title,
+    fontSize: 44,
+    lineHeight: 50,
+    fontWeight: '700',
+    letterSpacing: 8,
+    textAlign: 'center',
+    color: colors.text,
+    marginTop: 18,
+  },
+  headlineWin: {
+    color: colors.goldLight,
+  },
+  headlineLose: {
+    color: colors.danger,
+  },
+  noticeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  noticeText: {
+    ...text.caption,
+    flexShrink: 1,
+  },
+  sectionTitle: {
+    fontFamily: fontFamily.title,
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 3,
+    color: colors.goldLight,
+    marginTop: 28,
+    marginBottom: 0,
+  },
+  spacer: {
+    flexGrow: 1,
+    minHeight: 8,
+  },
+  footnote: {
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    lineHeight: 15,
+    color: colors.textFaint,
+    marginTop: 16,
+  },
   emptyWrap: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: spacing.lg,
+    gap: spacing.sm,
   },
-  scroll: {
-    paddingTop: spacing.xl,
-    paddingBottom: spacing.xxl,
-    alignItems: 'center',
-    width: '100%',
-  },
-  eyebrow: {
-    ...text.label,
-    color: colors.goldLight,
-    letterSpacing: 4,
-  },
-  headline: {
+  emptyTitle: {
     fontFamily: fontFamily.title,
-    fontSize: 44,
+    fontSize: 30,
     fontWeight: '700',
-    color: colors.paper,
-    letterSpacing: 8,
-    marginTop: spacing.sm,
+    letterSpacing: 4,
+    color: colors.text,
   },
-  win: {
-    color: colors.goldLight,
-  },
-  lose: {
-    color: colors.danger,
-  },
-  subline: {
+  emptyHint: {
     ...text.caption,
-    marginTop: spacing.sm,
-    marginBottom: spacing.lg,
     textAlign: 'center',
-  },
-  badgeRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.xs,
-    justifyContent: 'center',
-    marginBottom: spacing.md,
-  },
-  panel: {
-    width: '100%',
-    marginBottom: spacing.md,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderWidth: borderWidth.hair,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    marginBottom: spacing.xs,
-  },
-  rowWin: {
-    borderColor: colors.goldLight,
-    backgroundColor: 'rgba(201,166,90,0.16)',
-  },
-  rowName: {
-    ...text.bodyStrong,
-  },
-  rowRight: {
-    flexDirection: 'row',
-    gap: spacing.xs,
-  },
-  settingLine: {
-    ...text.label,
-    fontSize: 11,
-    marginBottom: 2,
-  },
-  footnote: {
-    ...text.label,
-    color: colors.danger,
-    textAlign: 'center',
-    marginBottom: spacing.md,
-  },
-  actions: {
-    width: '100%',
-    gap: spacing.sm,
-  },
-  actionRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-  },
-  actionItem: {
-    flex: 1,
-  },
-  footer: {
-    ...text.label,
-    fontSize: 10,
-    textAlign: 'center',
-    marginTop: spacing.lg,
   },
 });

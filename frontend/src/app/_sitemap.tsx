@@ -14,7 +14,7 @@ const ROUTES = [
   { path: '/battle', label: '对局中 Battle' },
   { path: '/cards', label: '卡牌图鉴 Cards' },
   { path: '/result', label: '对局结算 Result' },
-  { path: '/ai-lab', label: 'AI 实验室（占位）' },
+  { path: '/ai-lab', label: 'AI 实验室' },
 ];
 
 /** expo-router 默认生成的 /_sitemap 页面（导出时也会产出 HTML，因此补一个真实标题） */

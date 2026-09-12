@@ -1,9 +1,15 @@
+/**
+ * 牌堆（fig3_1：左侧「牌堆(N)」，N 用后端真实 `public.deck_count`）。
+ *
+ * 设计图上的 28 是错的 —— DESIGN_SPEC §4 强制要求一律用真实数字。
+ * `known_top` 只渲染 observation 里「自己有权知道」的牌顶（别人的观星结果不下发）。
+ */
 import { LinearGradient } from 'expo-linear-gradient';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { colors, gradients } from '@/theme/colors';
-import { borderWidth, radius, shadows, spacing } from '@/theme/spacing';
-import { fontFamily, text } from '@/theme/typography';
+import { nightColors } from '@/theme/colors';
+import { borderWidth, radius } from '@/theme/spacing';
+import { fontFamily } from '@/theme/typography';
 import type { KnownTopCard } from '@/types/card';
 import { cardNameOf } from '@/utils/card-catalog';
 
@@ -12,50 +18,68 @@ interface DeckPileProps {
   knownTop?: KnownTopCard[];
   highlighted?: boolean;
   onPress?: () => void;
+  /** 由响应式布局给（设计基准 58 宽） */
+  width?: number;
 }
 
-/** 牌堆 + 自己已知的牌顶（observation.known_top，只显示自己有权知道的内容） */
-export function DeckPile({ count, knownTop = [], highlighted = false, onPress }: DeckPileProps) {
+export function DeckPile({ count, knownTop = [], highlighted = false, onPress, width = 58 }: DeckPileProps) {
+  const height = Math.round(width * 1.42);
+
   return (
     <Pressable
       accessibilityRole={onPress ? 'button' : 'image'}
-      accessibilityLabel={`牌堆剩余 ${count} 张${
-        knownTop.length > 0 ? `，已知牌顶 ${knownTop.length} 张` : ''
-      }`}
+      accessibilityLabel={`牌堆剩余 ${count} 张${knownTop.length > 0 ? `，已知牌顶 ${knownTop.length} 张` : ''}`}
       disabled={!onPress}
       onPress={onPress}
       style={styles.wrapper}
     >
-      <View style={styles.stack}>
-        <View style={[styles.back, styles.backThird]} />
-        <View style={[styles.back, styles.backSecond]} />
+      <View style={[styles.stack, { width, height }]}>
+        <View style={[styles.back, styles.backThird, { width, height }]} />
+        <View style={[styles.back, styles.backSecond, { width, height }]} />
         <LinearGradient
-          colors={highlighted ? gradients.jade : gradients.cardArt}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={[styles.back, styles.backTop, highlighted ? styles.backHighlight : null]}
+          colors={highlighted ? ['#348470', '#123A32'] : ['#1E4350', '#0C1C24']}
+          start={{ x: 0.2, y: 0 }}
+          end={{ x: 0.85, y: 1 }}
+          style={[
+            styles.back,
+            styles.backTop,
+            { width, height },
+            highlighted ? styles.highlight : null,
+          ]}
         >
-          <Text style={styles.backGlyph}>卜</Text>
+          <Text style={styles.glyph} allowFontScaling={false}>
+            卜
+          </Text>
         </LinearGradient>
       </View>
 
-      <Text style={styles.countLabel}>牌堆</Text>
-      <Text style={styles.count}>{count}</Text>
+      <View style={styles.labelRow}>
+        <Text style={styles.label} allowFontScaling={false}>
+          牌堆
+        </Text>
+        <Text style={styles.count} allowFontScaling={false}>
+          {count}
+        </Text>
+      </View>
 
-      <View style={styles.knownList}>
-        {knownTop.length === 0 ? (
-          <Text style={styles.knownEmpty}>牌顶未知</Text>
-        ) : (
-          knownTop.map((entry) => (
+      {knownTop.length > 0 ? (
+        <View style={styles.knownList}>
+          {knownTop.slice(0, 3).map((entry) => (
             <View key={`${entry.position}-${entry.card_id}`} style={styles.knownChip}>
-              <Text style={styles.knownPosition}>{entry.position + 1}</Text>
-              <Text style={styles.knownName} numberOfLines={1}>
+              <Text style={styles.knownPosition} allowFontScaling={false}>
+                {entry.position + 1}
+              </Text>
+              <Text style={styles.knownName} numberOfLines={1} allowFontScaling={false}>
                 {entry.name ?? cardNameOf(entry.card_id)}
               </Text>
             </View>
-          ))
-        )}
-      </View>
+          ))}
+        </View>
+      ) : (
+        <Text style={styles.knownEmpty} allowFontScaling={false}>
+          牌顶未知
+        </Text>
+      )}
     </Pressable>
   );
 }
@@ -65,19 +89,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   stack: {
-    width: 62,
-    height: 84,
     justifyContent: 'center',
     alignItems: 'center',
   },
   back: {
     position: 'absolute',
-    width: 58,
-    height: 80,
     borderRadius: radius.sm,
-    borderWidth: borderWidth.thin,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.surfaceRaised,
+    borderWidth: borderWidth.hair,
+    borderColor: 'rgba(120, 178, 196, 0.45)',
+    backgroundColor: '#14262F',
   },
   backSecond: {
     transform: [{ translateX: 3 }, { translateY: 3 }],
@@ -90,54 +110,64 @@ const styles = StyleSheet.create({
   backTop: {
     alignItems: 'center',
     justifyContent: 'center',
-    ...shadows.card,
   },
-  backHighlight: {
-    borderColor: colors.jadeLight,
+  highlight: {
+    borderColor: nightColors.jade,
   },
-  backGlyph: {
+  glyph: {
     fontFamily: fontFamily.title,
-    fontSize: 26,
-    color: colors.gold,
-    opacity: 0.85,
+    fontSize: 24,
+    color: 'rgba(201, 166, 90, 0.9)',
   },
-  countLabel: {
-    ...text.label,
-    marginTop: spacing.xs,
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 3,
+    marginTop: 6,
+  },
+  label: {
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.celadon,
+    letterSpacing: 1,
   },
   count: {
-    ...text.bodyStrong,
-    color: colors.goldLight,
-  },
-  knownList: {
-    marginTop: spacing.xs,
-    alignItems: 'center',
-    maxWidth: 140,
+    fontFamily: fontFamily.title,
+    fontSize: 14,
+    fontWeight: '700',
+    color: nightColors.cardEdge,
   },
   knownEmpty: {
-    ...text.label,
-    fontSize: 10,
+    fontFamily: fontFamily.body,
+    fontSize: 9,
+    color: nightColors.muted,
+    marginTop: 2,
+  },
+  knownList: {
+    marginTop: 3,
+    alignItems: 'center',
+    maxWidth: 96,
   },
   knownChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderWidth: borderWidth.hair,
-    borderColor: colors.jadeBorder,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(78, 178, 148, 0.55)',
     borderRadius: radius.pill,
-    paddingHorizontal: spacing.xs,
+    paddingHorizontal: 5,
     paddingVertical: 1,
     marginTop: 2,
-    backgroundColor: 'rgba(6,25,27,0.7)',
+    backgroundColor: 'rgba(7, 15, 20, 0.72)',
   },
   knownPosition: {
-    ...text.label,
-    fontSize: 9,
-    color: colors.jadeLight,
+    fontFamily: fontFamily.body,
+    fontSize: 8,
+    color: nightColors.jade,
     marginRight: 3,
   },
   knownName: {
-    ...text.label,
-    fontSize: 10,
-    color: colors.paper,
+    fontFamily: fontFamily.body,
+    fontSize: 9,
+    color: nightColors.card,
   },
 });

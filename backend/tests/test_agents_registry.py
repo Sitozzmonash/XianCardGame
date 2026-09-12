@@ -98,9 +98,15 @@ def test_parse_agent_mccfr_loads_model(monkeypatch, tmp_path):
     trainer = StubMCCFRTrainer(0)
 
     class FakeTrainer:
+        """`lazy` 也要接住并记录：`MCCFRAgent.load` 必须传 `lazy=None`（自动），
+        否则「仅策略」部署产物会被整表展开（实测 eager 11s vs lazy 0.01s）。"""
+
+        seen_lazy: list[object] = []
+
         @classmethod
-        def load(cls, path):
+        def load(cls, path, lazy=None):
             seen.append(path)
+            cls.seen_lazy.append(lazy)
             return trainer
 
     package = types.ModuleType("training")
@@ -116,6 +122,7 @@ def test_parse_agent_mccfr_loads_model(monkeypatch, tmp_path):
     assert isinstance(agent, MCCFRAgent)
     assert agent.trainer is trainer
     assert seen == [str(model)]
+    assert FakeTrainer.seen_lazy == [None], "必须以 lazy=None（自动）载入，让部署产物走懒加载"
 
     # Windows 盘符里的冒号必须原样保留
     agent2 = parse_agent("mccfr:D:/models/a.pkl")
@@ -127,8 +134,11 @@ def test_mccfr_agent_load_classmethod(monkeypatch, tmp_path):
     trainer = StubMCCFRTrainer(0)
 
     class FakeTrainer:
+        requested_lazy: list[object] = []
+
         @classmethod
-        def load(cls, path):
+        def load(cls, path, lazy=None):
+            cls.requested_lazy.append(lazy)
             return trainer
 
     module = types.ModuleType("training.trainer")
@@ -141,6 +151,7 @@ def test_mccfr_agent_load_classmethod(monkeypatch, tmp_path):
 
     agent = MCCFRAgent.load("models/whatever.pkl", seed=1)
     assert isinstance(agent, MCCFRAgent) and agent.trainer is trainer
+    assert FakeTrainer.requested_lazy == [None], "load 必须以 lazy=None（自动）载入"
 
     state = GameState(GameConfig(num_players=3, seed=1), seed=1)
     assert agent.act(state, state.decision_player()) in state.legal_actions()

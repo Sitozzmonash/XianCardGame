@@ -1,13 +1,23 @@
+/**
+ * 特殊决策总调度层。
+ *
+ * battle.tsx 只负责渲染 `<SpecialDecisionLayer />`，四种特殊决策各自独立成组件：
+ *   COUNTER          → CounterDialog
+ *   REORDER          → ReorderTopDialog（拖拽排序）
+ *   REINSERT         → ReinsertTribulationDialog
+ *   PLAY_CARD_TARGET → TargetPlayerDialog
+ * 每个弹窗的可见性与选项**全部来自后端 view / legal_actions**，前端不做规则推断。
+ */
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { PrimaryButton } from '@/components/ui/PrimaryButton';
+import { NightButton } from '@/components/ui/NightButton';
 import { useGameStore } from '@/store/game-store';
-import { colors } from '@/theme/colors';
-import { borderWidth, radius, spacing } from '@/theme/spacing';
-import { text } from '@/theme/typography';
-import { cardNameOf } from '@/utils/card-catalog';
+import { nightColors } from '@/theme/colors';
+import { borderWidth, radius } from '@/theme/spacing';
+import { fontFamily } from '@/theme/typography';
 import type { GameView } from '@/types/game';
+import { cardNameOf } from '@/utils/card-catalog';
 import {
   counterActions,
   playerNameOf,
@@ -26,16 +36,6 @@ import { TargetPlayerDialog } from './TargetPlayerDialog';
 
 type Region = 'TOP' | 'NEAR_TOP' | 'MIDDLE' | 'BOTTOM';
 
-/**
- * 特殊决策总调度层。
- *
- * battle.tsx 只负责渲染 <SpecialDecisionLayer />，四种特殊决策各自独立成组件：
- *   COUNTER  → CounterDialog
- *   REORDER  → ReorderTopDialog
- *   REINSERT → ReinsertTribulationDialog
- *   PLAY_CARD_TARGET → TargetPlayerDialog
- * 每个弹窗的可见性与选项**全部来自后端 view/legal_actions**。
- */
 export function SpecialDecisionLayer() {
   const view = useGameStore((state) => state.view);
   const isSubmitting = useGameStore((state) => state.isSubmitting);
@@ -78,9 +78,21 @@ export function SpecialDecisionLayer() {
 
   const threatText = useMemo(() => {
     if (!view) return '有人对你出手。';
-    const opened = [...view.events].reverse().find((event) => event.type === 'COUNTER_OPENED');
-    if (opened) {
-      return `${playerNameOf(view, opened.actor)} 对你使用【${cardNameOf(opened.card_id)}】`;
+    const events = view.events;
+    const openedIndex = events.map((event) => event.type).lastIndexOf('COUNTER_OPENED');
+    if (openedIndex >= 0) {
+      const opened = events[openedIndex];
+      // 契约（backend/app/services/events.py）：COUNTER_OPENED 的 data 只带 `target`（被偷的那位），
+      // 不带牌名 —— 牌名要从同一 actor 前置的 CARD_PLAYED 事件取（其 data 里有中文 `name`）。
+      const played = [...events.slice(0, openedIndex)]
+        .reverse()
+        .find((event) => event.type === 'CARD_PLAYED' && event.actor === opened.actor);
+      const playedId = typeof played?.data?.card_id === 'string' ? played.data.card_id : undefined;
+      const playedName =
+        typeof played?.data?.name === 'string' && played.data.name
+          ? played.data.name
+          : cardNameOf(playedId);
+      return `${playerNameOf(view, opened.actor)} 对你使用【${playedName}】`;
     }
     const last = battleLog.length > 0 ? battleLog[battleLog.length - 1] : undefined;
     return last ? `最近事件：${last}` : '有人对你出手。';
@@ -89,8 +101,7 @@ export function SpecialDecisionLayer() {
   if (!view) return null;
 
   const isViewerTurn = view.decision_player === view.viewer_player_id;
-  const showCounter =
-    view.phase === 'COUNTER' && isViewerTurn && Boolean(counter.use || counter.pass);
+  const showCounter = view.phase === 'COUNTER' && isViewerTurn && Boolean(counter.use || counter.pass);
   const showReorder = view.phase === 'REORDER' && isViewerTurn && tokens.length > 0 && Boolean(reorder);
   const showReinsert = view.phase === 'REINSERT' && isViewerTurn && reinserts.length > 0;
   const showTarget = targetPlayers.length > 0 && Boolean(selectedCardId);
@@ -109,15 +120,17 @@ export function SpecialDecisionLayer() {
     <View>
       {pendingLabel && dismissed === decisionKey ? (
         <View style={styles.pending}>
-          <Text style={styles.pendingText}>你有未完成的决策：{pendingLabel}</Text>
-          <View style={styles.pendingButton}>
-            <PrimaryButton
-              label="继续决策"
-              variant="gold"
-              compact
-              onPress={() => setDismissed(null)}
-            />
-          </View>
+          <Text style={styles.pendingText} numberOfLines={2} allowFontScaling={false}>
+            你有未完成的决策：{pendingLabel}
+          </Text>
+          <NightButton
+            label="继续决策"
+            variant="gold"
+            height={34}
+            fontSize={11}
+            onPress={() => setDismissed(null)}
+            style={styles.pendingButton}
+          />
         </View>
       ) : null}
 
@@ -182,21 +195,22 @@ const styles = StyleSheet.create({
   pending: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
     borderWidth: borderWidth.hair,
-    borderColor: colors.borderStrong,
+    borderColor: nightColors.cardEdgeSoft,
     borderRadius: radius.md,
-    backgroundColor: 'rgba(201,166,90,0.16)',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    marginTop: spacing.sm,
+    backgroundColor: 'rgba(201, 166, 90, 0.14)',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    marginTop: 6,
   },
   pendingText: {
-    ...text.caption,
     flex: 1,
-    color: colors.goldLight,
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.cardEdge,
   },
   pendingButton: {
-    minWidth: 104,
-    marginLeft: spacing.sm,
+    minWidth: 92,
   },
 });

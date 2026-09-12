@@ -101,9 +101,11 @@ export const REGION_HINTS: Record<string, string> = {
   BOTTOM: '本局基本不会再出现',
 };
 
+/** 牌类中文名的**唯一来源**（card-detail/card-visuals.ts 直接复用本表）。
+ *  DEFUSE 用「护劫符」（= 后端真实牌名 / CARD_SPECS_FALLBACK 的 name），不是「护劫」。 */
 export const CATEGORY_LABELS: Record<string, string> = {
   TRIBULATION: '天劫',
-  DEFUSE: '护劫',
+  DEFUSE: '护劫符',
   ACTIVE: '主动',
   REACTIVE: '反制',
 };

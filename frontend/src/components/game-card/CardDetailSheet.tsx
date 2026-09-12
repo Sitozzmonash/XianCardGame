@@ -1,10 +1,16 @@
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+/**
+ * 手牌详情 / 施法确认（fig3_2 的夜间版）。
+ *
+ * 行为铁律不变：**只有 legal_actions 里存在对应动作时**调用方才会传 `actionLabel`，
+ * 本组件绝不自行判断「这张牌能不能出」。
+ */
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Panel } from '@/components/ui/Panel';
-import { PrimaryButton } from '@/components/ui/PrimaryButton';
-import { colors, categoryColors } from '@/theme/colors';
-import { radius, spacing } from '@/theme/spacing';
-import { text } from '@/theme/typography';
+import { NightButton } from '@/components/ui/NightButton';
+import { NightTag } from '@/components/ui/NightTag';
+import { nightColors } from '@/theme/colors';
+import { borderWidth, radius } from '@/theme/spacing';
+import { fontFamily } from '@/theme/typography';
 import type { CardCategory } from '@/types/card';
 import { CATEGORY_LABELS, cardSpecOf } from '@/utils/card-catalog';
 
@@ -16,7 +22,7 @@ interface CardDetailSheetProps {
   name?: string;
   category?: CardCategory | string | null;
   description?: string;
-  /** 只有存在对应 legal action 时才由调用方传入（FRONTEND_GUIDE §4.4） */
+  /** 只有存在对应 legal action 时才由调用方传入 */
   actionLabel?: string;
   actionHint?: string;
   onConfirm?: () => void;
@@ -25,7 +31,6 @@ interface CardDetailSheetProps {
   cardWidth?: number;
 }
 
-/** 手牌详情：插画 / 卡名 / 类型 / 效果说明 / 确认使用 / 取消 */
 export function CardDetailSheet({
   visible,
   cardId,
@@ -37,20 +42,13 @@ export function CardDetailSheet({
   onConfirm,
   onClose,
   disabled = false,
-  cardWidth = 168,
+  cardWidth = 132,
 }: CardDetailSheetProps) {
   const spec = cardSpecOf(cardId ?? undefined);
   const resolvedCategory = (category ?? spec?.category ?? 'ACTIVE') as CardCategory;
-  const palette = categoryColors[resolvedCategory] ?? categoryColors.ACTIVE;
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}
-      statusBarTranslucent
-    >
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       <View style={styles.overlay}>
         <Pressable
           style={StyleSheet.absoluteFill}
@@ -58,56 +56,81 @@ export function CardDetailSheet({
           accessibilityRole="button"
           accessibilityLabel="关闭卡牌详情"
         />
-        <Panel tone="surface" title="卡牌详情" style={styles.sheet}>
-          <View style={styles.body}>
+        <View style={styles.sheet}>
+          <View style={styles.header}>
+            <Text style={styles.title} allowFontScaling={false}>
+              {name ?? spec?.name ?? '未知卡牌'}
+            </Text>
+            <NightTag label={CATEGORY_LABELS[resolvedCategory] ?? resolvedCategory} tone="gold" />
+          </View>
+
+          <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
             {cardId ? (
               <GameCard
                 cardId={cardId}
                 name={name ?? spec?.name}
                 category={resolvedCategory}
                 size="detail"
+                state={actionLabel ? 'playable' : 'idle'}
                 width={cardWidth}
-                height={Math.round(cardWidth / 0.68)}
+                height={Math.round(cardWidth / 0.648)}
               />
             ) : null}
 
             <View style={styles.info}>
-              <Text style={styles.name}>{name ?? spec?.name ?? '未知卡牌'}</Text>
-              <Text style={[styles.category, { color: palette.border }]}>
-                {CATEGORY_LABELS[resolvedCategory] ?? resolvedCategory}
+              <Text style={styles.sectionLabel} allowFontScaling={false}>
+                效果
               </Text>
-              <Text style={styles.description}>
-                {description ?? spec?.description ?? '暂无说明。'}
-              </Text>
+              <View style={styles.descBox}>
+                <Text style={styles.description} allowFontScaling={false}>
+                  {description ?? spec?.description ?? '暂无说明。'}
+                </Text>
+              </View>
               {actionLabel ? (
-                <Text style={styles.actionHint}>
+                <Text style={styles.actionHint} allowFontScaling={false}>
                   {actionHint ?? '该动作由后端 legal_actions 提供'}
                 </Text>
               ) : (
-                <Text style={styles.disabledHint}>
+                <Text style={styles.disabledHint} allowFontScaling={false}>
                   当前局面没有这张牌的合法动作，无法使用（规则以后端为准）。
                 </Text>
               )}
             </View>
-          </View>
+          </ScrollView>
 
           <View style={styles.footer}>
-            <View style={styles.footerItem}>
-              <PrimaryButton label="取消" variant="ghost" onPress={onClose} testID="card-cancel" />
-            </View>
+            <NightButton
+              label="收回法术"
+              variant="ghost"
+              onPress={onClose}
+              testID="card-cancel"
+              height={44}
+              style={styles.footerItem}
+            />
             {actionLabel && onConfirm ? (
-              <View style={styles.footerItem}>
-                <PrimaryButton
-                  label={actionLabel}
-                  variant="gold"
-                  disabled={disabled}
-                  onPress={onConfirm}
-                  testID="card-confirm"
-                />
-              </View>
-            ) : null}
+              <NightButton
+                label={actionLabel}
+                variant="gold"
+                disabled={disabled}
+                onPress={onConfirm}
+                testID="card-confirm"
+                height={44}
+                glyph="施"
+                style={styles.footerItem}
+              />
+            ) : (
+              <NightButton
+                label="施展法术"
+                variant="gold"
+                disabled
+                onPress={() => undefined}
+                hint="当前局面该牌没有合法动作"
+                height={44}
+                style={styles.footerItem}
+              />
+            )}
           </View>
-        </Panel>
+        </View>
       </View>
     </Modal>
   );
@@ -116,50 +139,79 @@ export function CardDetailSheet({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: colors.overlay,
+    backgroundColor: nightColors.overlay,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: spacing.lg,
+    padding: 16,
   },
   sheet: {
     width: '100%',
-    maxWidth: 520,
+    maxWidth: 430,
+    maxHeight: '86%',
+    borderRadius: radius.lg,
+    borderWidth: borderWidth.hair,
+    borderColor: nightColors.cardEdgeSoft,
+    backgroundColor: 'rgba(19, 35, 47, 0.97)',
+    padding: 12,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  title: {
+    fontFamily: fontFamily.title,
+    fontSize: 18,
+    fontWeight: '700',
+    color: nightColors.celadonLight,
+    letterSpacing: 2,
   },
   body: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.md,
+    gap: 12,
+    paddingBottom: 4,
   },
   info: {
     flex: 1,
-    minWidth: 180,
+    minWidth: 150,
   },
-  name: {
-    ...text.heading,
-  },
-  category: {
-    ...text.label,
-    marginTop: spacing.xxs,
+  sectionLabel: {
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.muted,
     letterSpacing: 2,
+    marginBottom: 4,
+  },
+  descBox: {
+    borderRadius: radius.sm,
+    borderWidth: borderWidth.hair,
+    borderColor: 'rgba(201, 166, 90, 0.35)',
+    backgroundColor: 'rgba(245, 230, 200, 0.92)',
+    padding: 8,
   },
   description: {
-    ...text.body,
-    marginTop: spacing.sm,
+    fontFamily: fontFamily.body,
+    fontSize: 12,
+    lineHeight: 19,
+    color: '#2A1E0B',
   },
   actionHint: {
-    ...text.label,
-    color: colors.goldLight,
-    marginTop: spacing.md,
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.cardEdge,
+    marginTop: 8,
   },
   disabledHint: {
-    ...text.label,
-    color: colors.danger,
-    marginTop: spacing.md,
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.dangerText,
+    marginTop: 8,
   },
   footer: {
     flexDirection: 'row',
-    marginTop: spacing.lg,
-    gap: spacing.sm,
+    gap: 8,
+    marginTop: 10,
   },
   footerItem: {
     flex: 1,

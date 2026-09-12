@@ -80,8 +80,35 @@ def agent_spec_from_request(req_agent: Any) -> str:
     # mccfr
     path = req_agent.get("model") or req_agent.get("path") or req_agent.get("model_path")
     if not path:
-        raise InvalidAgentSpec("mccfr 需要 model / path 字段指向 .pkl")
+        # 允许直接用 `GET /agents` 返回的模型 id（前端天然会发 id 而不是路径），
+        # 通过 ModelRegistry 解析成真实路径；未知 id 给出可用清单而不是笼统报错。
+        model_id = req_agent.get("id") or req_agent.get("model_id")
+        if model_id:
+            path = _resolve_model_id(str(model_id).strip())
+    if not path:
+        raise InvalidAgentSpec(
+            "mccfr 需要 model / path / id 字段指向 .pkl"
+            "（id 用 GET /agents 返回的模型条目 id）"
+        )
     return f"mccfr:{str(path).strip()}"
+
+
+def _resolve_model_id(model_id: str) -> str:
+    """把 `GET /agents` 的模型 id 解析为模型路径。
+
+    找不到时抛出带「可用 id 清单」的中文错误，方便前端与用户自查。
+    """
+    from .model_registry import get_model_registry  # 延迟导入，避免循环依赖
+
+    entries = get_model_registry().list_models()
+    for entry in entries:
+        if entry.id == model_id:
+            return entry.path
+    available = "、".join(e.id for e in entries) or "（models/index.json 为空）"
+    raise InvalidAgentSpec(
+        f"未知的模型 id：{model_id}；可用模型：{available}"
+        "。训练后请运行 python main.py models --write-index 刷新清单。"
+    )
 
 
 def normalize_agent_spec(
@@ -190,19 +217,60 @@ def build_seat_agents(
 
     座位 seed 派生：`game_seed + seat * SEAT_SEED_STRIDE`（固定常量 → 完全可复现；
     同一 seed 下每次跑出的对局逐帧一致，便于前端联调与回归）。
+
+    对 MCCFR 座位会额外标注**模型人数与对局人数是否匹配**（见 `_annotate_model_players`）。
     """
     st = settings or get_settings()
     agents: dict = {}
     metas: dict = {}
+    game_players = len(agent_specs)
     for seat, spec in enumerate(agent_specs):
         if spec is None:
             continue
         agent, meta = build_agent_with_meta(
             spec, int(seed) + seat * SEAT_SEED_STRIDE, st
         )
+        _annotate_model_players(meta, game_players)
         agents[seat] = agent
         metas[seat] = meta
     return agents, metas
+
+
+def _annotate_model_players(meta: dict, game_players: int) -> None:
+    """标注「模型是按几个人训练的」。
+
+    模型的信息集 key 含 `hand_sizes`（长度 = 人数）与 `alive_mask`（N 位掩码），
+    跨人数的键空间不重叠 —— 2 人模型放进 3 人局会**命中率恒为 0、100% 回落 RuleAgent**，
+    且不会抛任何异常。因此这里**不拒绝请求**（保留做对照实验的自由），但必须：
+    1. 写中文警告日志；2. 在 `public.players[].agent` 里透出 `players_mismatch` 供前端提示。
+    """
+    if meta.get("type") != "mccfr":
+        return
+    path = meta.get("model")
+    if not path:
+        return
+    try:
+        from training.trainer import peek_model_players
+
+        model_players = peek_model_players(str(path))
+    except Exception as exc:  # 读不到就只记日志，不影响建局
+        log.debug("读取模型人数失败（忽略）：%s：%s", path, exc)
+        return
+    if model_players is None:
+        return
+
+    meta["model_players"] = int(model_players)
+    meta["game_players"] = int(game_players)
+    mismatch = int(model_players) != int(game_players)
+    meta["players_mismatch"] = mismatch
+    if mismatch:
+        log.warning(
+            "MCCFR 模型人数不匹配：模型 %s 是「%s 人」模型，当前对局为「%s 人」→ "
+            "信息集键空间不重叠，本次命中率将恒为 0%%，实际由 RuleAgent 代打。"
+            "请训练对应人数的模型：python main.py train --players %s --iterations 10000 "
+            "--out models/mccfr_%sp_10k.pkl",
+            path, model_players, game_players, game_players, game_players,
+        )
 
 
 __all__ = [

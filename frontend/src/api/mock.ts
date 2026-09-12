@@ -4,6 +4,11 @@
  * 契约一致性：返回结构与 API_CONTRACT.md 的 GameView / legal_actions / events 完全一致，
  * 因此前端代码路径在 mock / 真后端之间**没有任何分支差异**（差异只在 src/api/game.ts 的转发）。
  *
+ * 事件形状同样以真后端为唯一权威（`backend/app/services/events.py:render_event()`）：
+ * **每条事件只含 `seq / type / actor / data` 四键**，牌名 / 受害者 / 区域一律在 `data` 里
+ * （详见下面的 ev()）。隐藏信息纪律也照抄后端：`CARD_STOLEN` 不给被偷的牌、
+ * `CARD_DRAWN` 不给牌面、`DECK_REORDERED` 不给排序结果。
+ *
  * 它不是规则引擎，而是**脚本化演示局**：
  *  - 决策点顺序、AI 行为、牌堆内容都由下面的脚本决定；
  *  - 但牌堆顶的抽取、观星结果、逆天改命排序、天劫回插后的顺序都是**真实作用于**这份牌堆的；
@@ -27,7 +32,7 @@ import type {
   PrivateCardToken,
 } from '@/types/card';
 import type { ReinsertRegion as EventRegion } from '@/types/event';
-import type { GameEvent, GameEventType } from '@/types/event';
+import type { GameEvent, GameEventData, GameEventType } from '@/types/event';
 import type {
   ActionPayload,
   CreateGameRequest,
@@ -87,16 +92,14 @@ type NodeId = 'action' | 'counter' | 'reorder' | 'reinsert' | 'ended';
 
 type Draft = Omit<GameEvent, 'seq'>;
 
-function ev(type: GameEventType, extra: Partial<GameEvent> = {}): Draft {
-  return {
-    type,
-    actor: null,
-    target: null,
-    card_id: null,
-    message: null,
-    data: null,
-    ...extra,
-  };
+/**
+ * 构造一条事件草稿：**只含 `type / actor / data` 三键**（`seq` 由 numbered() 补）。
+ * 形状以真后端的 `backend/app/services/events.py:render_event()` 为准 ——
+ * 牌名 / 受害者 / 区域等细节一律放进 `data`，绝不写在顶层
+ * （顶层 `target`/`card_id`/`message` 在真后端恒为 undefined，曾导致日志出现「未知牌」）。
+ */
+function ev(type: GameEventType, actor: number | null, data: GameEventData = {}): Draft {
+  return { type, actor, data };
 }
 
 function numbered(drafts: Draft[]): GameEvent[] {
@@ -165,7 +168,10 @@ class MockSession {
 
   initialView(): GameView {
     return this.buildView(
-      numbered([ev('GAME_STARTED', { data: { players: this.numPlayers } }), ev('TURN_STARTED', { actor: 0 })]),
+      numbered([
+        ev('GAME_STARTED', null, { players: this.numPlayers }),
+        ev('TURN_STARTED', 0, { turn_no: this.turnNo }),
+      ]),
     );
   }
 
@@ -426,7 +432,9 @@ class MockSession {
     if (!cardId) {
       throw new ApiError(400, 'INVALID_PAYLOAD', 'card_instance_id 不在当前手牌中。');
     }
-    const drafts: Draft[] = [ev('CARD_PLAYED', { actor: 0, card_id: cardId })];
+    const drafts: Draft[] = [
+      ev('CARD_PLAYED', 0, { card_id: cardId, name: cardNameOf(cardId) }),
+    ];
 
     switch (cardId) {
       case 'STARGAZING': {
@@ -437,7 +445,8 @@ class MockSession {
           card_id: card,
           name: cardNameOf(card),
         }));
-        drafts.push(ev('DECK_PEEKED', { actor: 0, data: { amount: revealed.length } }));
+        // 公开事件只报张数；牌面属于私有信息（真后端只对观星者本人合并 private cards）
+        drafts.push(ev('DECK_PEEKED', 0, { count: revealed.length }));
         break;
       }
       case 'REWRITE_FATE': {
@@ -479,11 +488,14 @@ class MockSession {
     }
 
     this.consumeCard(action.card_instance_id);
-    const drafts: Draft[] = [ev('CARD_PLAYED', { actor: 0, card_id: 'STEAL', target })];
+    const drafts: Draft[] = [
+      ev('CARD_PLAYED', 0, { card_id: 'STEAL', name: cardNameOf('STEAL') }),
+    ];
     const stolen = this.stealFromAi(target);
     if (stolen) {
       this.hand.push(stolen);
-      drafts.push(ev('CARD_STOLEN', { actor: 0, target, card_id: stolen }));
+      // 谁被偷是公开的、偷到什么是私有的 —— 事件里绝不带牌面（真后端同款纪律）
+      drafts.push(ev('CARD_STOLEN', 0, { target }));
     }
     this.actionsUsed += 1;
     return drafts;
@@ -497,15 +509,16 @@ class MockSession {
     this.hand.splice(index, 1);
     this.discard.push('COUNTER');
 
-    const drafts: Draft[] = [ev('COUNTER_USED', { actor: 0, target: this.pendingStealer })];
+    const drafts: Draft[] = [ev('COUNTER_USED', 0)];
     return this.resolveCounterOutcome(drafts);
   }
 
   private handlePassCounter(): Draft[] {
-    const drafts: Draft[] = [ev('COUNTER_PASSED', { actor: 0, target: this.pendingStealer })];
+    const drafts: Draft[] = [ev('COUNTER_PASSED', 0)];
     const lost = this.stealFromHuman();
     if (lost) {
-      drafts.push(ev('CARD_STOLEN', { actor: this.pendingStealer, target: 0, card_id: lost }));
+      // actor = 偷的人，被偷的人放 data.target；被偷的牌面不下发
+      drafts.push(ev('CARD_STOLEN', this.pendingStealer, { target: 0 }));
     }
     return this.resolveCounterOutcome(drafts);
   }
@@ -537,7 +550,8 @@ class MockSession {
     this.phase = 'ACTION';
     this.decisionPlayer = 0;
 
-    return [ev('DECK_REORDERED', { actor: 0, data: { order: [...(order as string[])] } })];
+    // 排序结果不回传（真后端 DECK_REORDERED 的 data 为空对象）
+    return [ev('DECK_REORDERED', 0)];
   }
 
   private handleReinsert(action: LegalAction, payload: ActionPayload): Draft[] {
@@ -559,12 +573,8 @@ class MockSession {
     this.actionsUsed = 0;
 
     return [
-      ev('TRIBULATION_REINSERTED', {
-        actor: 0,
-        card_id: 'TRIBULATION',
-        data: { region: region as EventRegion, position },
-      }),
-      ev('TURN_STARTED', { actor: 0 }),
+      ev('TRIBULATION_REINSERTED', 0, { region: region as EventRegion }),
+      ev('TURN_STARTED', 0, { turn_no: this.turnNo }),
     ];
   }
 
@@ -572,12 +582,13 @@ class MockSession {
 
   private endHumanTurn(draw: boolean, skipped = false): Draft[] {
     const drafts: Draft[] = [];
-    if (skipped) drafts.push(ev('TURN_SKIPPED', { actor: 0 }));
-    drafts.push(ev('TURN_ENDED', { actor: 0 }));
+    if (skipped) drafts.push(ev('TURN_SKIPPED', 0));
+    drafts.push(ev('TURN_ENDED', 0));
 
     if (draw) {
       const drawn = this.drawFor(0);
-      if (drawn) drafts.push(ev('CARD_DRAWN', { actor: 0, card_id: drawn }));
+      // 抽牌事件只报手牌数，牌面仅本人可见（真后端 CARD_DRAWN = { hand_count }）
+      if (drawn) drafts.push(ev('CARD_DRAWN', 0, { hand_count: this.hand.length }));
       if (drawn === 'TRIBULATION') {
         return [...drafts, ...this.resolveTribulation()];
       }
@@ -588,20 +599,25 @@ class MockSession {
 
     others.forEach((player, position) => {
       if (stealer !== null) return;
-      drafts.push(ev('TURN_STARTED', { actor: player }));
+      drafts.push(ev('TURN_STARTED', player, { turn_no: this.turnNo }));
 
       // 第一个对手洗牌：演示 known_top 被清空（只打乱底部，保持演示牌序可控）
       if (this.turnNo === 1 && position === 0) {
-        drafts.push(ev('CARD_PLAYED', { actor: player, card_id: 'SHUFFLE' }));
-        drafts.push(ev('DECK_SHUFFLED', { actor: player }));
+        drafts.push(
+          ev('CARD_PLAYED', player, { card_id: 'SHUFFLE', name: cardNameOf('SHUFFLE') }),
+        );
+        drafts.push(ev('DECK_SHUFFLED', player));
         this.shuffleBottomHalfForDemo();
       }
 
       // 最后一个对手用摄物术指向真人 → 触发反制决策（演示 CounterDialog）
       const isLast = position === others.length - 1;
       if (this.turnNo === 1 && !this.counterDemoUsed && isLast && this.hand.length > 0) {
-        drafts.push(ev('CARD_PLAYED', { actor: player, card_id: 'STEAL', target: 0 }));
-        drafts.push(ev('COUNTER_OPENED', { actor: player, target: 0, card_id: 'STEAL' }));
+        drafts.push(
+          ev('CARD_PLAYED', player, { card_id: 'STEAL', name: cardNameOf('STEAL') }),
+        );
+        // actor = 偷的人；data.target = 需要决定是否反制的那位（被偷的人）
+        drafts.push(ev('COUNTER_OPENED', player, { target: 0 }));
         this.counterDemoUsed = true;
         this.pendingStealer = player;
         this.node = 'counter';
@@ -613,24 +629,24 @@ class MockSession {
       }
 
       const aiDrawn = this.drawFor(player, true);
-      if (aiDrawn) drafts.push(ev('CARD_DRAWN', { actor: player }));
-      drafts.push(ev('TURN_ENDED', { actor: player }));
+      if (aiDrawn) drafts.push(ev('CARD_DRAWN', player, { hand_count: this.aiHandCounts[player] }));
+      drafts.push(ev('TURN_ENDED', player));
     });
 
     if (stealer !== null) return drafts;
 
     this.startHumanTurn();
-    drafts.push(ev('TURN_STARTED', { actor: 0 }));
+    drafts.push(ev('TURN_STARTED', 0, { turn_no: this.turnNo }));
     return drafts;
   }
 
   private resolveCounterOutcome(drafts: Draft[]): Draft[] {
     if (this.pendingStealer !== null) {
-      drafts.push(ev('TURN_ENDED', { actor: this.pendingStealer }));
+      drafts.push(ev('TURN_ENDED', this.pendingStealer));
     }
     this.pendingStealer = null;
     this.startHumanTurn();
-    drafts.push(ev('TURN_STARTED', { actor: 0 }));
+    drafts.push(ev('TURN_STARTED', 0, { turn_no: this.turnNo }));
     return drafts;
   }
 
@@ -646,21 +662,14 @@ class MockSession {
   }
 
   private resolveTribulation(): Draft[] {
-    const drafts: Draft[] = [
-      ev('TRIBULATION_DRAWN', { actor: 0, card_id: 'TRIBULATION', data: { reason: 'draw' } }),
-    ];
+    // 天劫降临时不公开牌面来源，data 为空（真后端 TRIBULATION_DRAWN = {}）
+    const drafts: Draft[] = [ev('TRIBULATION_DRAWN', 0)];
 
     const defuseIndex = this.hand.indexOf('DEFUSE');
     if (defuseIndex >= 0) {
       this.hand.splice(defuseIndex, 1);
       this.discard.push('DEFUSE');
-      drafts.push(
-        ev('TRIBULATION_DEFUSED', {
-          actor: 0,
-          card_id: 'DEFUSE',
-          data: { consumed_card: 'DEFUSE' },
-        }),
-      );
+      drafts.push(ev('TRIBULATION_DEFUSED', 0, { consumed_card: 'DEFUSE' }));
       this.tribulationResolved = true;
       this.node = 'reinsert';
       this.phase = 'REINSERT';
@@ -669,7 +678,8 @@ class MockSession {
       return drafts;
     }
 
-    drafts.push(ev('PLAYER_ELIMINATED', { target: 0, data: { reason: 'no_defuse' } }));
+    // 被淘汰的座位放在 actor（真后端把座位作为 actor，data 为空）
+    drafts.push(ev('PLAYER_ELIMINATED', 0));
     this.alive[0] = false;
     const survivor = this.otherPlayers().find((player) => this.alive[player]) ?? null;
     this.finishGame(survivor, drafts);
@@ -678,15 +688,16 @@ class MockSession {
 
   /** 天劫化解并回插之后，再结束一次行动 → 其余玩家陆续淘汰 → 真人获胜 */
   private finale(): Draft[] {
-    const drafts: Draft[] = [ev('TURN_ENDED', { actor: 0 })];
+    const drafts: Draft[] = [ev('TURN_ENDED', 0)];
 
     this.otherPlayers().forEach((player) => {
       if (!this.alive[player]) return;
-      drafts.push(ev('TURN_STARTED', { actor: player }));
-      drafts.push(ev('CARD_DRAWN', { actor: player }));
-      drafts.push(ev('TRIBULATION_DRAWN', { actor: player, card_id: 'TRIBULATION' }));
+      drafts.push(ev('TURN_STARTED', player, { turn_no: this.turnNo }));
+      drafts.push(ev('CARD_DRAWN', player, { hand_count: this.aiHandCounts[player] }));
+      drafts.push(ev('TRIBULATION_DRAWN', player));
       this.alive[player] = false;
-      drafts.push(ev('PLAYER_ELIMINATED', { target: player, data: { reason: 'no_defuse' } }));
+      // 被淘汰者就在 actor 里
+      drafts.push(ev('PLAYER_ELIMINATED', player));
       this.drawFor(player, true);
     });
 
@@ -699,11 +710,7 @@ class MockSession {
     this.phase = 'ENDED';
     this.winner = winner;
     this.decisionPlayer = -1;
-    drafts.push(
-      ev('GAME_ENDED', {
-        data: { winner, reason: winner === null ? 'draw' : 'last_alive' },
-      }),
-    );
+    drafts.push(ev('GAME_ENDED', null, { winner, forced_stop: false }));
   }
 
   // ---------------------------------------------------------------- 状态工具

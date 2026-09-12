@@ -1,10 +1,16 @@
+/**
+ * 弹窗外壳（fig3_1 的四个特殊决策弹窗共用）—— 夜蓝青瓷变体。
+ * 统一的遮罩 / 标题 / 关闭（支持系统返回键与遮罩点击关闭）。
+ *
+ * ⚠️ 这里是「强决策」外壳：即使不可关闭也不会把用户卡死 —— 关闭只会退回到
+ * battle 页的「你有未完成的决策」入口，决策本身仍然只有 legal_actions 能提交。
+ */
 import { PropsWithChildren, ReactNode } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Panel } from '@/components/ui/Panel';
-import { colors } from '@/theme/colors';
-import { borderWidth, minTouchTarget, radius, spacing } from '@/theme/spacing';
-import { text } from '@/theme/typography';
+import { nightColors } from '@/theme/colors';
+import { borderWidth, minTouchTarget, radius } from '@/theme/spacing';
+import { fontFamily } from '@/theme/typography';
 
 export type DialogTone = 'jade' | 'gold' | 'danger';
 
@@ -13,7 +19,6 @@ interface DialogFrameProps {
   title: string;
   subtitle?: string;
   tone?: DialogTone;
-  /** 是否允许关闭（返回键 / 遮罩 / × 按钮）。特殊决策为强决策时仍允许关闭，避免把用户卡死 */
   dismissable?: boolean;
   onClose?: () => void;
   footer?: ReactNode;
@@ -21,12 +26,17 @@ interface DialogFrameProps {
 }
 
 const TONE_BORDER: Record<DialogTone, string> = {
-  jade: colors.jadeBorder,
-  gold: colors.borderStrong,
-  danger: colors.dangerBorder,
+  jade: 'rgba(78, 178, 148, 0.6)',
+  gold: nightColors.cardEdgeSoft,
+  danger: nightColors.dangerSoft,
 };
 
-/** 弹窗外壳：统一的遮罩 / 标题 / 关闭（支持系统返回键与遮罩点击关闭） */
+const TONE_GLYPH: Record<DialogTone, string> = {
+  jade: '阵',
+  gold: '符',
+  danger: '劫',
+};
+
 export function DialogFrame({
   visible,
   title,
@@ -35,7 +45,7 @@ export function DialogFrame({
   dismissable = true,
   onClose,
   footer,
-  maxWidth = 520,
+  maxWidth = 400,
   children,
 }: PropsWithChildren<DialogFrameProps>) {
   const handleClose = () => {
@@ -58,28 +68,45 @@ export function DialogFrame({
           accessibilityLabel="关闭弹窗"
         />
         <View style={[styles.shell, { maxWidth, borderColor: TONE_BORDER[tone] }]} accessibilityViewIsModal>
-          <Panel tone="surface" padded={false} style={styles.panel}>
-            <View style={styles.header}>
-              <View style={styles.headerText}>
-                <Text style={styles.title}>{title}</Text>
-                {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
-              </View>
-              {dismissable ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="关闭弹窗"
-                  onPress={handleClose}
-                  style={styles.close}
-                >
-                  <Text style={styles.closeText}>×</Text>
-                </Pressable>
+          <View style={styles.header}>
+            <View style={[styles.seal, { borderColor: TONE_BORDER[tone] }]}>
+              <Text style={styles.sealGlyph} allowFontScaling={false}>
+                {TONE_GLYPH[tone]}
+              </Text>
+            </View>
+            <View style={styles.headerText}>
+              <Text style={styles.title} allowFontScaling={false}>
+                {title}
+              </Text>
+              {subtitle ? (
+                <Text style={styles.subtitle} numberOfLines={2} allowFontScaling={false}>
+                  {subtitle}
+                </Text>
               ) : null}
             </View>
+            {dismissable ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="关闭弹窗"
+                onPress={handleClose}
+                style={styles.close}
+              >
+                <Text style={styles.closeText} allowFontScaling={false}>
+                  ×
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
 
-            <View style={styles.body}>{children}</View>
+          <ScrollView
+            style={styles.body}
+            contentContainerStyle={styles.bodyContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {children}
+          </ScrollView>
 
-            {footer ? <View style={styles.footer}>{footer}</View> : null}
-          </Panel>
+          {footer ? <View style={styles.footer}>{footer}</View> : null}
         </View>
       </View>
     </Modal>
@@ -89,38 +116,57 @@ export function DialogFrame({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: colors.overlay,
+    backgroundColor: nightColors.overlay,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: spacing.lg,
+    padding: 16,
   },
   shell: {
     width: '100%',
+    maxHeight: '88%',
     borderWidth: borderWidth.hair,
     borderRadius: radius.lg,
     overflow: 'hidden',
-    backgroundColor: colors.surface,
-  },
-  panel: {
-    borderRadius: 0,
-    borderWidth: 0,
+    backgroundColor: 'rgba(15, 29, 39, 0.97)',
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.md,
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 6,
+  },
+  seal: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+    borderWidth: borderWidth.hair,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(7, 15, 20, 0.75)',
+  },
+  sealGlyph: {
+    fontFamily: fontFamily.title,
+    fontSize: 13,
+    color: nightColors.cardEdge,
   },
   headerText: {
     flex: 1,
   },
   title: {
-    ...text.heading,
-    fontSize: 18,
+    fontFamily: fontFamily.title,
+    fontSize: 16,
+    fontWeight: '700',
+    color: nightColors.celadonLight,
+    letterSpacing: 2,
   },
   subtitle: {
-    ...text.caption,
-    marginTop: spacing.xxs,
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.muted,
+    marginTop: 2,
+    lineHeight: 14,
   },
   close: {
     minWidth: minTouchTarget,
@@ -129,19 +175,24 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   closeText: {
-    color: colors.muted,
-    fontSize: 22,
-    lineHeight: 24,
+    fontFamily: fontFamily.body,
+    fontSize: 20,
+    lineHeight: 22,
+    color: nightColors.muted,
   },
   body: {
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.sm,
+    flexGrow: 0,
+  },
+  bodyContent: {
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 8,
   },
   footer: {
-    paddingHorizontal: spacing.md,
-    paddingBottom: spacing.md,
-    paddingTop: spacing.md,
     flexDirection: 'row',
-    gap: spacing.sm,
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
   },
 });

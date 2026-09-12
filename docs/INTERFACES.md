@@ -313,10 +313,23 @@ class MCCFRTrainer:
               log_every: int = 1000, progress: bool = True) -> None
     def average_strategy(self, state: GameState, player: int) -> dict[str, float]
     def stats(self) -> dict      # iterations/traversals/infosets/iter_per_sec/elapsed
-    def save(self, path: str) -> None
+    def save(self, path: str, strategy_only: bool = False, format: str = "v2") -> None   # §3.5
     @classmethod
-    def load(cls, path: str) -> "MCCFRTrainer"     # 必须能读旧格式（str key 的 .pkl）
+    def load(cls, path: str, migrate_legacy: bool = True,
+             lazy: bool | None = False) -> "MCCFRTrainer"     # 必须能读旧格式（str key 的 .pkl）
+    # 信息集口径（**两个口径分开**，旧格式模型两者可能不等，不是缺陷）：
+    strategy_infoset_count: int   # 平均策略表规模 = 推理时真正能查表的信息集数（MCCFRAgent 覆盖面）
+    regret_infoset_count: int     # 后悔表规模（旧参考模型 169,634，策略表 433,870）
+    infoset_count: int            # = strategy_infoset_count（**推理覆盖口径**，对外默认）
+    lazy: bool                    # 是否懒加载（v2 部署产物，未展开成 Python dict）
 ```
+- `save()` 默认写 v2 紧凑二进制；`save(path)` / `load(path)` 的旧调用方式继续可用
+  （`strategy_only` / `format` / `lazy` 都是带默认值的关键字参数）。详见 §3.5。
+- `load(..., lazy=True)` 只保留几块 bytes + 稀疏锚点，查表按需解码；
+  `lazy=None` 表示自动（`strategy_only` 模型懒加载，全量模型展开）。
+- **信息集口径**：`infoset_count` 一律是「推理覆盖」（= `strategy_infoset_count`）；
+  想拿 regret 表规模请显式用 `regret_infoset_count`。旧格式模型两个数字不等
+  （traverser 只在自己当 update-player 时写 regret，策略表覆盖所有被访问到的信息集）。
 - 模型文件 = `pickle` 的 dict：`{format_version, config, seed, exploration,
   iterations_done, traversals_done, regret_sum, strategy_sum}`，`pickle.HIGHEST_PROTOCOL`。
 - `load()` 需兼容参考实现产出的 `models/mccfr_2p_10k.pkl`（旧 key 为 `repr(str)`），
@@ -431,7 +444,16 @@ ACTION_KEY: list[str]                            # 反查表
    - 现状（冻结的 `dict[tuple, dict[str,float]]` 表示）：124.0 MB（旧 repr）→ 102.5 MB（紧凑 tuple）
      → **61.2 MB（+动作 key 池化）**。该表示的地板约 40–50 MB，**因此"<10MB"用现表示不可达**。
    - 二进制存储目标：**全量（regret + strategy）≤ 30 MB**、**仅策略（部署产物）≤ 20 MB**、
-     每信息集 ≤ 60 B（全量）/ ≤ 45 B（仅策略）、加载耗时 ≤ 5 s（本地 SSD）。
+     每信息集 ≤ 60 B（全量）/ ≤ 45 B（仅策略）。
+   - 加载耗时**按用途拆开**（本地 SSD，2026-09-12 细化）：
+     **懒加载（部署/首请求路径，`load(..., lazy=True)`）≤ 5 s** 是硬指标（实测 0.01~0.15 s）；
+     **全量展开（训练/续训路径，`load(..., lazy=False)`）≤ 10 s**（实测 1.9~2.8 s 干净进程）。
+     理由：两条路径用途完全不同——部署只看懒加载；续训要展开成 Python dict，是固有成本。
+     **注意**：全量展开的墙钟时间与「进程内存状态」强相关（同一份仅策略模型：
+     干净子进程 1.9 s；进程里已展开过一张 43 万信息集的表时 8.8 s；此时还叠加 CPU 争用
+     可达 36 s），因为它要一次性建 ~200 万个 Python 对象。为此 `codec.unpack_tables()`
+     在解码期间临时关闭循环 GC（这些对象无引用环，纯引用计数足够），把「脏进程」下的
+     载入从 29.4 s 降到 8.8 s。压测/CI 请**单独跑**这一项。
    - round-trip 后 regret/strategy 数值与 Python dict 版本逐项一致（float32 允许 1e-6 误差）。
 6. **规模定律（必须写进 README/RUNBOOK）**：信息集数量 ≈ **42 个/迭代**（10K → 43 万），
    近似线性增长 → 100K ≈ 420 万信息集、1M ≈ 4200 万。体积与内存同步放大：
@@ -570,6 +592,12 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 | A4 | `public_state(player)` 的 `player` 参数对返回内容无影响 | 保留参数以对齐签名（公共信息对所有 viewer 一致），实现可忽略该参数。 |
 | A5 | 上游 `GameState.public_state()` 起初额外返回 `deck_size/hand_sizes/alive` | **删除**：`public_state()` 严格 5 键（见 §4.1 白名单）；需要这些字段的调试代码请用 `debug_public_state()`。 |
 | A6 | `main.py play` 的渲染函数曾读取被删除的 `hand_sizes/alive/deck_size` | 已改为读契约字段（`public.players[].hand_count/alive` + `public.deck_count`）。**契约字段被收紧时，必须全仓 grep 旧字段名**。 |
+| A7 | `POST /games` 里 mccfr 座位如何引用模型 | 允许三种写法：`model` / `path`（文件路径）、`id` / `model_id`（**`GET /agents` 返回的模型条目 id**，由 `ModelRegistry` 解析成路径）。未知 id → 400 `INVALID_AGENT`，且错误信息里**必须列出可用 id 与刷新命令**（`python main.py models --write-index`）。`GET /agents` 的模型条目额外透出 `players` / `iterations`，供前端按人数过滤。 |
+| A8 | 模型格式 v2 的载入耗时预算 | 拆成两条按用途区分：**懒加载 ≤5s**（部署/首请求路径，实测 0.01~0.15s）；**全量 eager ≤10s**（续训路径，实测 2.5s）。服务端 `ModelRegistry` 必须用 `MCCFRTrainer.load(path, lazy=None)`（自动），否则仅策略模型首次加载要 11s+。 |
+| A9 | `infoset_count` 的口径 | 语义定为**推理覆盖面**（= 策略表规模）；同时暴露 `strategy_infoset_count` / `regret_infoset_count`。旧格式模型两者不等（如 433,870 vs 169,634），属正常现象，`main.py models` 展示策略表口径并在不等时提示。 |
+| A10 | 模型人数 ≠ 对局人数 | **不拒绝请求**（保留对照实验自由），但必须显式暴露：`public.players[].agent` 里带 `model_players` / `game_players` / `players_mismatch`，并写中文 WARNING 日志（含对应训练命令）。原因：跨人数键空间不重叠，静默退化到 RuleAgent 最危险。 |
+| A11 | 动作空间是**牌类型级**而非实例级 | 引擎 `legal_actions()` 用 `if Card.PEEK in hand` 这种类型判断（与参考实现一致，为保住「同种子 2815 步零差异」**不改引擎**）：手里有两张同名牌时 `legal_actions` 只有**一条** `PLAY_CARD`，`card_instance_id` 指向**第一个匹配实例**（实测 seed=4：手牌 `h_0_2`/`h_0_4` 均为 STARGAZING，动作只给 `h_0_2`）。**约定**：消费方必须把同 `card_id` 的其它实例视为同样可打（前端 `actionsForCard` 已做此兜底），否则第二张会被误标「不可用」。若将来改成实例级动作，须同步重训模型 + 更新参考实现对照测试。 |
+| A12 | 手牌实例 id 是**位置性**的 | 形如 `h_<player>_<index>`；出牌/抽牌后整手牌重新编号（实测：打掉 index 2 后原 `h_0_3`/`h_0_4` 变为 `h_0_2`/`h_0_3`），`legal_actions[].id` 也随之变化。⇒ 前端不得跨 revision 缓存 `instance_id` / `action_id`，提交必须带 `revision`（旧 revision 一律 409）。 |
 
 ---
 
@@ -581,3 +609,4 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 | 2026-09-12 | 新增 §3.5 模型格式 v2（紧凑二进制） | 实测 108 MB → 目标 ≤30 MB；key 编码只解决 1/2 体积 |
 | 2026-09-12 | 新增 §4.1 响应字段严格白名单 | 上游/实现各自加字段导致泄漏面扩大与契约漂移 |
 | 2026-09-12 | 新增附录 A 歧义裁决 | 多 Agent 并行时同名信息出现两种命名（`deck_size` vs `deck_count`）等 |
+| 2026-09-12 | §3.5 载入预算拆成「懒加载 ≤5 s（部署/首请求）/ 全量展开 ≤10 s（续训）」 | 两种路径用途不同；且实测全量展开的墙钟时间主要受进程内存状态与 CPU 争用影响，原一刀切的 5 s 口径会得出误导性结论 |

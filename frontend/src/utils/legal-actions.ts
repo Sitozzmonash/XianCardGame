@@ -10,11 +10,36 @@ import type { GameView, LegalAction } from '@/types/game';
 
 export type CardVisualState = 'idle' | 'playable' | 'selected' | 'disabled';
 
-/** 该手牌实例对应的所有动作（PLAY_CARD 一条，PLAY_CARD_TARGET 每个目标一条） */
+/** 该手牌实例对应的所有动作（PLAY_CARD 一条，PLAY_CARD_TARGET 每个目标一条）
+ *
+ * ⚠️ 同名多张牌的坑（实测发现）：后端的动作空间是**按牌类型**生成的
+ * （参考实现 `legal_actions()` 就是 `if Card.PEEK in hand` 这种类型判断，本仓引擎保持一致），
+ * 所以手里有两张「观星术」时，`legal_actions` 里只有**一条** PLAY_CARD，
+ * 其 `card_instance_id` 指向第一个匹配实例（h_0_2），第二张（h_0_4）在动作里根本不出现。
+ * 若严格按 instance_id 匹配，UI 会把第二张误标成「✕ 不可用」——但它其实是可打的
+ * （先打掉第一张，动作会自动指向剩下那张）。
+ *
+ * 因此这里的兜底：查不到精确匹配时，**按 card_id 找同类型实例上的动作**。
+ * 这仍然完全由 legal_actions 派生（引擎是类型级动作，同类型实例等价），不复制任何规则。
+ */
 export function actionsForCard(view: GameView | undefined, instanceId: string): LegalAction[] {
   if (!view) return [];
-  return view.legal_actions.filter(
+  const exact = view.legal_actions.filter(
     (action) => action.card_instance_id === instanceId && action.enabled !== false,
+  );
+  if (exact.length > 0) return exact;
+
+  const hand = view.observation.hand;
+  const cardId = hand.find((card) => card.instance_id === instanceId)?.card_id;
+  if (!cardId) return [];
+  const siblings = new Set(
+    hand.filter((card) => card.card_id === cardId).map((card) => card.instance_id),
+  );
+  return view.legal_actions.filter(
+    (action) =>
+      !!action.card_instance_id &&
+      siblings.has(action.card_instance_id) &&
+      action.enabled !== false,
   );
 }
 

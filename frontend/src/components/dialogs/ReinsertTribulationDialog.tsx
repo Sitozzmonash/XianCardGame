@@ -1,10 +1,14 @@
+/**
+ * 天劫回插（API_CONTRACT §12.5）：TOP / NEAR_TOP / MIDDLE / BOTTOM。
+ * 四个区域**各自对应后端发出的一条 REINSERT_TRIBULATION 动作**，没有动作的区域禁用。
+ */
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { PrimaryButton } from '@/components/ui/PrimaryButton';
-import { colors } from '@/theme/colors';
-import { borderWidth, minTouchTarget, radius, spacing } from '@/theme/spacing';
-import { text } from '@/theme/typography';
+import { NightButton } from '@/components/ui/NightButton';
+import { nightColors } from '@/theme/colors';
+import { borderWidth, minTouchTarget, radius } from '@/theme/spacing';
+import { fontFamily } from '@/theme/typography';
 import type { LegalAction } from '@/types/game';
 import { REGION_HINTS, REGION_LABELS } from '@/utils/card-catalog';
 
@@ -29,7 +33,6 @@ function regionOf(action: LegalAction): Region | null {
   return (found as Region | undefined) ?? null;
 }
 
-/** 天劫回插（API_CONTRACT §12.5）：TOP / NEAR_TOP / MIDDLE / BOTTOM */
 export function ReinsertTribulationDialog({
   visible,
   actions,
@@ -55,22 +58,25 @@ export function ReinsertTribulationDialog({
       onClose={onClose}
       footer={
         <>
-          <View style={styles.footerItem}>
-            <PrimaryButton label="稍后决定" variant="ghost" onPress={onClose} disabled={submitting} />
-          </View>
-          <View style={styles.footerItem}>
-            <PrimaryButton
-              label={action ? action.label : `回插：${REGION_LABELS[region]}`}
-              variant="gold"
-              disabled={!action || submitting}
-              loading={submitting}
-              onPress={() => {
-                if (action) onSelect(action, region);
-              }}
-              glyph="劫"
-              testID="reinsert-confirm"
-            />
-          </View>
+          <NightButton
+            label="稍后决定"
+            variant="ghost"
+            onPress={onClose}
+            disabled={submitting}
+            style={styles.footerItem}
+          />
+          <NightButton
+            label={action ? action.label : `回插：${REGION_LABELS[region]}`}
+            variant="danger"
+            disabled={!action || submitting}
+            loading={submitting}
+            onPress={() => {
+              if (action) onSelect(action, region);
+            }}
+            glyph="劫"
+            testID="reinsert-confirm"
+            style={styles.footerItem}
+          />
         </>
       }
     >
@@ -90,21 +96,33 @@ export function ReinsertTribulationDialog({
                 styles.zone,
                 selected ? styles.zoneSelected : null,
                 !enabled ? styles.zoneDisabled : null,
-                { opacity: 1 - index * 0.12 },
+                { opacity: enabled ? 1 - index * 0.08 : 0.35 },
               ]}
             >
-              <Text style={[styles.zoneLabel, selected ? styles.zoneLabelSelected : null]}>
+              <Text
+                style={[styles.zoneLabel, selected ? styles.zoneLabelSelected : null]}
+                numberOfLines={1}
+                allowFontScaling={false}
+              >
                 {index + 1}. {REGION_LABELS[item]}
               </Text>
-              <Text style={styles.zoneHint}>{REGION_HINTS[item]}</Text>
-              {selected ? <Text style={styles.zoneTick}>✓ 已选</Text> : null}
+              <Text style={styles.zoneHint} numberOfLines={1} allowFontScaling={false}>
+                {REGION_HINTS[item]}
+              </Text>
+              {selected ? (
+                <Text style={styles.zoneTick} allowFontScaling={false}>
+                  ✓ 已选
+                </Text>
+              ) : null}
             </Pressable>
           );
         })}
       </View>
 
       {actions.length === 0 ? (
-        <Text style={styles.warn}>后端未给出回插动作，暂时无法提交（请刷新局面）。</Text>
+        <Text style={styles.warn} allowFontScaling={false}>
+          后端未给出回插动作，暂时无法提交（请刷新局面）。
+        </Text>
       ) : null}
     </DialogFrame>
   );
@@ -112,46 +130,51 @@ export function ReinsertTribulationDialog({
 
 const styles = StyleSheet.create({
   diagram: {
-    marginBottom: spacing.sm,
+    marginBottom: 4,
   },
   zone: {
     borderWidth: borderWidth.hair,
-    borderColor: colors.border,
+    borderColor: nightColors.hairline,
     borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     minHeight: minTouchTarget,
     justifyContent: 'center',
-    marginBottom: spacing.xs,
-    backgroundColor: 'rgba(164,66,61,0.12)',
+    marginBottom: 4,
+    backgroundColor: 'rgba(90, 33, 28, 0.32)',
   },
   zoneSelected: {
-    borderColor: colors.goldLight,
-    backgroundColor: 'rgba(201,166,90,0.22)',
+    borderColor: nightColors.cardEdgeSoft,
+    backgroundColor: 'rgba(201, 166, 90, 0.26)',
   },
   zoneDisabled: {
-    opacity: 0.4,
+    opacity: 0.35,
   },
   zoneLabel: {
-    ...text.bodyStrong,
+    fontFamily: fontFamily.title,
     fontSize: 13,
+    fontWeight: '700',
+    color: nightColors.card,
   },
   zoneLabelSelected: {
-    color: colors.goldLight,
+    color: nightColors.cardEdge,
   },
   zoneHint: {
-    ...text.label,
+    fontFamily: fontFamily.body,
     fontSize: 10,
+    color: nightColors.muted,
+    marginTop: 1,
   },
   zoneTick: {
-    ...text.label,
+    fontFamily: fontFamily.body,
     fontSize: 10,
-    color: colors.goldLight,
+    color: nightColors.cardEdge,
     marginTop: 2,
   },
   warn: {
-    ...text.label,
-    color: colors.danger,
+    fontFamily: fontFamily.body,
+    fontSize: 10,
+    color: nightColors.dangerText,
   },
   footerItem: {
     flex: 1,

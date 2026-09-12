@@ -30,9 +30,14 @@ function regionLabelOf(event: GameEvent): string {
 }
 
 export function presentEvent(event: GameEvent, nameOf: NameResolver): EventPresentation {
+  // 后端只下发 seq/type/actor/data 四键（见 backend/app/services/events.py:render_event），
+  // 牌名、受害者、区域全在 data 里 —— 读顶层字段会恒为 null（曾导致「未知牌」「天机」）。
+  const data = event.data ?? {};
   const actor = nameOf(event.actor);
-  const target = nameOf(event.target);
-  const card = cardNameOf(event.card_id);
+  const other = nameOf(typeof data.target === 'number' ? data.target : null);
+  const card = cardNameOf(typeof data.card_id === 'string' ? data.card_id : undefined);
+  /** CARD_PLAYED 后端直接给中文牌名，优先用它；兜底用本地卡表 */
+  const playedName = typeof data.name === 'string' && data.name ? data.name : card;
 
   const build = (
     tone: EventTone,
@@ -48,24 +53,14 @@ export function presentEvent(event: GameEvent, nameOf: NameResolver): EventPrese
     case 'TURN_STARTED':
       return build('jade', `${actor} 的回合`, '轮到其行动', 520);
     case 'CARD_PLAYED':
-      return build(
-        'jade',
-        `${actor} 打出【${card}】`,
-        event.target !== null && event.target !== undefined ? `指向 ${target}` : '灵光一闪',
-        760,
-      );
+      return build('jade', `${actor} 打出【${playedName}】`, '灵光一闪', 760);
     case 'CARD_DRAWN':
       return build('muted', `${actor} 抽了一张牌`, '牌面仅本人可见', 520);
     case 'CARD_STOLEN':
-      return build(
-        'danger',
-        `${actor} 夺走了 ${target} 的一张牌`,
-        `摄物术得手：${card}`,
-        900,
-        true,
-      );
+      // 后端故意不回传被偷的牌面（谁被偷是公开的，偷到什么是私有的）——这里绝不能显示牌名。
+      return build('danger', `${actor} 夺走了 ${other} 的一张牌`, '摄物术得手', 900, true);
     case 'COUNTER_OPENED':
-      return build('gold', '反制时机', `${target} 是否打出【反制符】？`, 900, true);
+      return build('gold', '反制时机', `${other} 是否打出【反制符】？`, 900, true);
     case 'COUNTER_USED':
       return build('gold', '反制符', `${actor} 打出反制符，效果被挡下`, 900, true);
     case 'COUNTER_PASSED':
@@ -85,7 +80,8 @@ export function presentEvent(event: GameEvent, nameOf: NameResolver): EventPrese
     case 'TRIBULATION_REINSERTED':
       return build('gold', '天劫回插', `回插至${regionLabelOf(event)}`, 900);
     case 'PLAYER_ELIMINATED':
-      return build('danger', `${target} 道消身殒`, '无护劫符，退出此局', 1300, true);
+      // 被淘汰者在 actor 里（backend/app/services/events.py 的 synth 用 _event(..., seat, {})）
+      return build('danger', `${actor} 道消身殒`, '无护劫符，退出此局', 1300, true);
     case 'TURN_ENDED':
       return build('muted', `${actor} 结束回合`, '移步下一位道友', 420);
     case 'GAME_ENDED': {

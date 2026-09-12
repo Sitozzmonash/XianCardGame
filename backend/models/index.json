@@ -1,0 +1,49 @@
+{
+  "models": [
+    {
+      "id": "mccfr_3p_10k",
+      "name": "MCCFR 3P 10K",
+      "path": "models/mccfr_3p_10k.pkl",
+      "players": 3,
+      "iterations": 10000,
+      "created_at": "2026-09-12",
+      "note": "3 人 / 10,000 迭代 / v2 紧凑二进制 / 全量（regret + strategy，可续训）"
+    },
+    {
+      "id": "mccfr_3p_10k_ckpt_10000",
+      "name": "MCCFR 3P 10K CKPT 10000",
+      "path": "models/mccfr_3p_10k_ckpt_10000.pkl",
+      "players": 3,
+      "iterations": 10000,
+      "created_at": "2026-09-12",
+      "note": "3 人 / 10,000 迭代 / v2 紧凑二进制 / 全量（regret + strategy，可续训）"
+    },
+    {
+      "id": "v2_10k",
+      "name": "V2 10K",
+      "path": "models/v2_10k.pkl",
+      "players": 2,
+      "iterations": 10000,
+      "created_at": "2026-09-12",
+      "note": "2 人 / 10,000 迭代 / v2 紧凑二进制 / 全量（regret + strategy，可续训）"
+    },
+    {
+      "id": "v2_10k_ckpt_10000",
+      "name": "V2 10K CKPT 10000",
+      "path": "models/v2_10k_ckpt_10000.pkl",
+      "players": 2,
+      "iterations": 10000,
+      "created_at": "2026-09-12",
+      "note": "2 人 / 10,000 迭代 / v2 紧凑二进制 / 全量（regret + strategy，可续训）"
+    },
+    {
+      "id": "v2_10k_strategy",
+      "name": "V2 10K STRATEGY",
+      "path": "models/v2_10k_strategy.pkl",
+      "players": 2,
+      "iterations": 10000,
+      "created_at": "2026-09-12",
+      "note": "2 人 / 10,000 迭代 / v2 紧凑二进制 / 仅策略（部署产物，不能续训）"
+    }
+  ]
+}

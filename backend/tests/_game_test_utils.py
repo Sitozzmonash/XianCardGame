@@ -24,12 +24,19 @@ _ref_modules: Optional[dict] = None
 
 
 def ensure_reference_importable() -> dict:
-    """导入只读参考实现（不修改其代码），返回需要的符号。"""
+    """导入只读参考实现（不修改其代码），返回需要的符号。
+
+    **用 `append` 而不是 `insert(0, …)`**：参考实现目录里也有一个 `main.py`
+    （`reference/xiuxian_ai_demo/main.py`，且没有 `def main`），插到搜索路径最前面会
+    遮蔽本仓 `backend/main.py` —— 之后任何 `import main as cli` 都会解析到参考实现那份，
+    报 `AttributeError: module 'main' has no attribute 'main'`。
+    参考实现只需要「可被找到」（`xiuxian` 包名在本仓不冲突），不需要「优先于本仓」。
+    """
     global _ref_modules
     if _ref_modules is None:
         for path in (str(BACKEND_DIR), str(REF_ROOT)):
             if path not in sys.path:
-                sys.path.insert(0, path)
+                sys.path.append(path)
         from xiuxian.agents import (  # type: ignore[import-not-found]
             Action as RefAction,
             ActionKind as RefActionKind,

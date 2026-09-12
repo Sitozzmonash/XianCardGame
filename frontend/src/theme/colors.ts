@@ -71,6 +71,11 @@ export const nightColors = {
   /** 状态 */
   danger: '#A4423D',
   dangerSoft: 'rgba(164, 66, 61, 0.55)',
+  /**
+   * 危险**文字**色（夜蓝青瓷板）。danger 是底色、对比度太低不能当文字色；
+   * 这个是同一语义的文字变体（原先在 6 个组件里裸写字面量，此处收拢为 token）。
+   */
+  dangerText: '#D98C84',
   disabled: 'rgba(143, 163, 173, 0.38)',
   /** 描边 / 分隔 */
   hairline: 'rgba(120, 178, 196, 0.22)',
@@ -121,7 +126,7 @@ export const categoryColors: Record<
   { border: string; glow: string; label: string }
 > = {
   TRIBULATION: { border: colors.danger, glow: 'rgba(164,66,61,0.55)', label: '天劫' },
-  DEFUSE: { border: colors.gold, glow: 'rgba(201,166,90,0.50)', label: '护劫' },
+  DEFUSE: { border: colors.gold, glow: 'rgba(201,166,90,0.50)', label: '护劫符' },
   ACTIVE: { border: colors.jadeLight, glow: 'rgba(87,179,164,0.45)', label: '主动' },
   REACTIVE: { border: colors.goldLight, glow: 'rgba(227,204,145,0.45)', label: '反制' },
 };

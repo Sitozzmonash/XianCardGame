@@ -43,14 +43,24 @@ class ModelEntry:
         return data
 
     def to_agent_info(self) -> dict:
-        """API_CONTRACT §5 的 agent 条目形态。"""
-        return {
+        """API_CONTRACT §5 的 agent 条目形态。
+
+        额外带 `players` / `iterations`：模型是**按人数训练**的（信息集键包含 hand_sizes
+        长度与 alive_mask 位宽，跨人数不可复用），前端需要据此过滤可选模型；缺失时前端
+        应回退为「人数未知」而不是报错。
+        """
+        info = {
             "id": self.id,
             "name": self.name,
             "type": "mccfr",
             "configurable": False,
             "model": self.path,
         }
+        if self.players is not None:
+            info["players"] = self.players
+        if self.iterations is not None:
+            info["iterations"] = self.iterations
+        return info
 
 
 @dataclass
@@ -164,7 +174,10 @@ class ModelRegistry:
             ) from exc
 
         try:
-            trainer = MCCFRTrainer.load(str(resolved))
+            # lazy=None（自动）：v2「仅策略」部署产物走懒加载（实测 0.15s / 不展开成 Python dict），
+            # 全量模型走整表展开。用默认的 lazy=False 会让仅策略模型在服务端首次加载耗时 11s+
+            # （实测对比：全量 eager 2.5s、仅策略 eager 11.1s、仅策略 lazy 0.15s）。
+            trainer = MCCFRTrainer.load(str(resolved), lazy=None)
         except Exception as exc:
             raise ModelLoadError(
                 f"模型加载失败：{exc}", details={"path": str(resolved)}
