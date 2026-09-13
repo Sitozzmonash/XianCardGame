@@ -56,15 +56,25 @@ export function presentEvent(event: GameEvent, nameOf: NameResolver): EventPrese
       return build('jade', `${actor} 打出【${playedName}】`, '灵光一闪', 760);
     case 'CARD_DRAWN':
       return build('muted', `${actor} 抽了一张牌`, '牌面仅本人可见', 520);
-    case 'CARD_STOLEN':
+    case 'CARD_STOLEN': {
       // 后端故意不回传被偷的牌面（谁被偷是公开的，偷到什么是私有的）——这里绝不能显示牌名。
-      return build('danger', `${actor} 夺走了 ${other} 的一张牌`, '摄物术得手', 900, true);
+      // 新规则下反制符会**反弹**，反弹造成的夺取带 redirected=true（actor=反弹方，target=原施术者）。
+      return data.redirected === true
+        ? build('danger', `${actor} 反夺了 ${other} 的一张牌`, '反制符反弹', 900, true)
+        : build('danger', `${actor} 夺走了 ${other} 的一张牌`, '摄物术得手', 900, true);
+    }
     case 'COUNTER_OPENED':
       return build('gold', '反制时机', `${other} 是否打出【反制符】？`, 900, true);
     case 'COUNTER_USED':
-      return build('gold', '反制符', `${actor} 打出反制符，效果被挡下`, 900, true);
+      // 新规则：反制符 = 令法术效果**转向施术者**（反弹），不再是「取消」
+      return data.redirected === true
+        ? build('gold', '反制符反弹', `法术效果转向 ${other}`, 1000, true)
+        : build('gold', '反制符', `${actor} 打出反制符，效果被挡下`, 900, true);
     case 'COUNTER_PASSED':
       return build('muted', '未反制', `${actor} 选择承受`, 620);
+    case 'ESCAPE_DODGED':
+      // 新规则：遁术是反制窗口里的反应牌 —— 法术完全无效 + 立即结束本次结算
+      return build('jade', '遁术闪避', `${actor} 遁走，${other} 的法术落空`, 900, true);
     case 'DECK_PEEKED':
       return build('jade', '观星术', `${actor} 窥得牌堆顶部`, 700);
     case 'DECK_REORDERED':

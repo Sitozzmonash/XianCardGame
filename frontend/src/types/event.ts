@@ -19,6 +19,7 @@ export type GameEventType =
   | 'COUNTER_OPENED'
   | 'COUNTER_USED'
   | 'COUNTER_PASSED'
+  | 'ESCAPE_DODGED'
   | 'DECK_PEEKED'
   | 'DECK_REORDERED'
   | 'DECK_SHUFFLED'
@@ -41,9 +42,12 @@ export type ReinsertRegion = 'TOP' | 'NEAR_TOP' | 'MIDDLE' | 'BOTTOM';
  * | `TURN_STARTED` | `turn_no` |
  * | `CARD_PLAYED` | `card_id`、**`name`（后端直接给中文牌名）** |
  * | `CARD_DRAWN` | `hand_count`（**不给牌面**，牌面只有本人可见） |
- * | `CARD_STOLEN` | `target`（受害者；**不给被偷的牌**——谁被偷是公开的，偷到什么是私有的） |
+ * | `CARD_STOLEN` | `target`（受害者；**不给被偷的牌**——谁被偷是公开的，偷到什么是私有的）；`redirected=true` 表示这是反制反弹造成的夺取（`actor`=反弹方，`target`=原施术者） |
  * | `COUNTER_OPENED` | `target`（被偷的那位，即需要决定是否反制的人） |
- * | `COUNTER_USED` / `COUNTER_PASSED` / `DECK_REORDERED` / `DECK_SHUFFLED` / `TURN_SKIPPED` / `TURN_ENDED` / `TRIBULATION_DRAWN` | 无 |
+ * | `COUNTER_USED` | `redirected`（true=反制符反弹生效）、`stolen`（反弹时是否真的拿到牌） |
+ * | `ESCAPE_DODGED` | `target`（施术者）；`actor`=用遁术躲开的人。法术完全无效，本次结算立即结束 |
+ * | `COUNTER_PASSED` / `DECK_REORDERED` / `DECK_SHUFFLED` / `TURN_ENDED` / `TRIBULATION_DRAWN` | 无 |
+ * | `TURN_SKIPPED` | **保留但不再产生**（旧规则「遁术跳过抽牌」的遗留事件，见 INTERFACES A13） |
  * | `DECK_PEEKED` | `count`；仅本人可见时另带 `cards[]` |
  * | `TRIBULATION_REINSERTED` | `region` |
  * | `TRIBULATION_DEFUSED` | `consumed_card`（恒为 `DEFUSE`） |
@@ -71,6 +75,10 @@ export interface GameEventData {
   forced_stop?: boolean;
   /** `DECK_PEEKED` 的私有牌顶（仅 viewer 自己时后端才下发） */
   cards?: unknown[];
+  /** 反制符**反弹**（新规则，INTERFACES A13）：`COUNTER_USED` / `CARD_STOLEN` 上出现 */
+  redirected?: boolean;
+  /** 反弹时是否真的夺到牌 */
+  stolen?: boolean;
   /** 后端未来新增字段（前向兼容） */
   [key: string]: unknown;
 }
