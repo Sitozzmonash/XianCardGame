@@ -88,6 +88,16 @@ run_frontend() {
   note "前端：TypeScript 类型检查"
   ( cd "$FRONTEND" && npx tsc --noEmit ) && ok "tsc --noEmit 0 错误" || bad "tsc 报错"
 
+  note "前端：源码目录不得有编译产物（裸跑单文件 tsc 会漏出 .js 污染 Metro 解析）"
+  local leaked
+  leaked="$(find "$FRONTEND/src" -name '*.js' -o -name '*.jsx' 2>/dev/null | wc -l)"
+  if [ "$leaked" -eq 0 ]; then
+    ok "src 下无 .js/.jsx 编译产物"
+  else
+    bad "src 下有 $leaked 个编译产物（删掉它们；tsconfig 已设 noEmit，别用单文件 tsc）"
+    find "$FRONTEND/src" -name '*.js' -o -name '*.jsx' 2>/dev/null | head -5
+  fi
+
   note "前端：Web 构建（真后端模式）"
   ( cd "$FRONTEND" && EXPO_NO_TELEMETRY=1 npx expo export --platform web \
       --output-dir dist-accept >/dev/null 2>&1 ) \

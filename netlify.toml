@@ -13,9 +13,15 @@
   # 部署后改成 Render 后端地址，例如 https://xiuxian-card-api.onrender.com/api/v1
   EXPO_PUBLIC_API_BASE_URL = "http://localhost:8000/api/v1"
 
-# 静态导出：expo-router 会为每个路由生成独立 HTML（index/battle/cards/setup/result/+not-found），
-# Netlify 的 Pretty URLs 会自动把 /cards 解析到 cards.html，因此**不要**加 SPA catch-all 重写，
-# 否则 /cards 会被重写回首页。未知路径回退到 Expo 生成的 404 页面。
+# 静态导出：expo-router 会为每个路由生成独立 HTML（index/setup/battle/cards/result/ai-lab/_sitemap/+not-found），
+# 以及 `card/[cardId]` 由 `generateStaticParams()` 预生成的 8 个卡牌页（`card/TRIBULATION.html` …）。
+# Netlify 的 Pretty URLs 会把 /cards 解析到 cards.html，**嵌套路由同理**（/card/STARGAZING → card/STARGAZING.html，
+# 已存在的文件优先于下面的 catch-all），因此**不要**加 SPA catch-all 重写，否则 /cards 会被重写回首页。
+# 未知路径回退到 Expo 生成的 404 页面。
+# 部署后**必须实测**（clean URL 与嵌套路由两条都要验）：
+#   curl -sI https://<site>/cards | head -1              # 期望 200
+#   curl -sI https://<site>/card/TRIBULATION | head -1   # 期望 200（不是 404）
+#   curl -sI https://<site>/nope | head -1               # 期望 404
 [[redirects]]
   from = "/*"
   to = "/+not-found.html"

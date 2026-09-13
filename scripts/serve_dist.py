@@ -43,6 +43,11 @@ class CleanUrlHandler(http.server.SimpleHTTPRequestHandler):
         if os.path.isfile(local):
             return local
 
+        # `/card/TRIBULATION` → card/TRIBULATION.html（嵌套路由，优先整段匹配）
+        nested = os.path.join(self.directory, *parts) + ".html"
+        if os.path.isfile(nested):
+            return nested
+
         # `/battle` 或 `/battle/anything` → battle.html
         stem = parts[0]
         candidate = os.path.join(self.directory, f"{stem}.html")
