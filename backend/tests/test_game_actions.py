@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from game.actions import (
     API_ACTION_TYPE,
     ACTION_LABELS,
@@ -15,6 +17,8 @@ from game.actions import (
     action_id,
 )
 from game.cards import Card
+from game.config import GameConfig
+from game.state import GameState, Phase
 
 EXPECTED_TYPES = {
     ActionKind.END_TURN: "END_ACTION",
@@ -96,10 +100,47 @@ def test_card_kind_tables_are_inverse():
     assert CARD_TO_KIND[Card.SHUFFLE] is ActionKind.PLAY_SHUFFLE
     for kind, card in KIND_TO_CARD.items():
         assert CARD_TO_KIND[card] is kind
-    # 天劫 / 护劫符 / 反制符不是"行动阶段出牌"（反制符走 COUNTER 动作）
+    # 天劫与护劫符没有「出牌类动作」（天劫不可主动使用、护劫符是自动生效的），不在表里。
     assert Card.TRIBULATION not in CARD_TO_KIND
     assert Card.DEFUSE not in CARD_TO_KIND
-    assert Card.COUNTER not in CARD_TO_KIND
+    # 反制符**在**表里（INTERFACES 附录 A15）：这张表回答的是「这个动作消耗哪张牌」，
+    # 而它同时决定 ① legal_action_dicts() 要不要带 card_instance_id
+    # ② 事件层补不补 CARD_PLAYED。反制符是**反应牌**，但反应牌一样要消耗牌、一样要有这两样。
+    # 「不能主动使用」由相位把关（见下面的 test_reactive_cards_are_phase_gated），
+    # 所以这里不断言「不在表里」。
+    assert KIND_TO_CARD[ActionKind.PLAY_COUNTER] is Card.COUNTER
+    assert CARD_TO_KIND[Card.COUNTER] is ActionKind.PLAY_COUNTER
+
+
+def test_reactive_cards_are_phase_gated():
+    """反应牌（反制符 / 遁术）**只能**在 Phase.COUNTER 出现：靠相位把关，不靠「不在 KIND_TO_CARD 里」。
+
+    这条断言取代了旧版「Card.COUNTER not in CARD_TO_KIND」那种以表格成员身份间接表达意图的写法 ——
+    那样写会与「反应牌也要消耗牌/要有 CARD_PLAYED」冲突，且真正的不变量（行动阶段拿不到它们）根本没被断言。
+    """
+    state = GameState(GameConfig(num_players=2, seed=7), seed=7)
+    # 行动阶段：既没有 PLAY_COUNTER 也没有 PLAY_SKIP
+    action_phase_kinds = {a.kind for a in state.legal_actions()}
+    assert ActionKind.PLAY_COUNTER not in action_phase_kinds
+    assert ActionKind.PLAY_SKIP not in action_phase_kinds
+
+    # 反制窗口：两条都在（前提是本人手里有这两张牌 —— 构造一个确定的局面）
+    state.hands[0] = [Card.COUNTER, Card.SKIP]
+    state.phase = Phase.COUNTER
+    state.pending_actor = 1
+    state.pending_target = 0
+    counter_phase_kinds = {a.kind for a in state.legal_actions()}
+    assert ActionKind.PLAY_COUNTER in counter_phase_kinds
+    assert ActionKind.PLAY_SKIP in counter_phase_kinds
+    assert ActionKind.PASS_COUNTER in counter_phase_kinds
+
+    # 直接构造一个 PLAY_COUNTER 在行动阶段提交 → 必须被拒绝。
+    # 实测拦在 `step()` 的合法集校验上（`ValueError: 非法动作：使用反制符`）——
+    # 比 `_step_action` 里的「未处理动作」守卫更早一层；两道都在，这里断言前一道。
+    with pytest.raises(ValueError, match="非法动作"):
+        GameState(GameConfig(num_players=2, seed=7), seed=7).step(
+            Action(ActionKind.PLAY_COUNTER)
+        )
 
 
 def test_reinsert_regions_are_frozen():

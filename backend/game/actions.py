@@ -46,13 +46,22 @@ API_ACTION_TYPE: dict[ActionKind, str] = {
     ActionKind.REINSERT: "REINSERT_TRIBULATION",
 }
 
-#: 出牌类动作 -> 消耗的卡
+#: 出牌类动作 -> 消耗的卡。
+#: `PLAY_COUNTER` 也在这里：它虽然是**反应牌**（合法性由 `Phase.COUNTER` 把关，见 `state.py`
+#: 的 `legal_actions()`），但把它算作「会消耗卡的动作」才能让两处一致 ——
+#: ① `legal_action_dicts()` 给「使用反制符」带上 `card_instance_id`
+#: （否则与同为反应牌的遁术不一致：遁术有条目句柄、反制符是 null）；
+#: ② 事件层为它补一条 `CARD_PLAYED`（契约 §13 / A13 规定「反制 = CARD_PLAYED(COUNTER) →
+#: COUNTER_USED → …」，此前实现漏了，而离线 mock 反而发了）。
+#: 安全性：引擎动作合法性由 phase 把关，且 `_step_action` 遇到 `PLAY_COUNTER` 会落到
+#: `raise RuntimeError(f"未处理动作：{action}")`，因此这张表不会让反制符变成可主动使用。
 KIND_TO_CARD: dict[ActionKind, Card] = {
     ActionKind.PLAY_PEEK: Card.PEEK,
     ActionKind.PLAY_REORDER: Card.REORDER,
     ActionKind.PLAY_SHUFFLE: Card.SHUFFLE,
     ActionKind.PLAY_SKIP: Card.SKIP,
     ActionKind.PLAY_STEAL: Card.STEAL,
+    ActionKind.PLAY_COUNTER: Card.COUNTER,
 }
 
 #: 卡 -> 出牌类动作（KIND_TO_CARD 的反向表）

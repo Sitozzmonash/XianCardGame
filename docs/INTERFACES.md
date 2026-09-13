@@ -608,6 +608,8 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 
 | A14 | 后端 `phase` 的**线上值与前端内部枚举名不同**，前端曾因此静默降级 | 后端 `PHASE_API_NAME`（`game/state.py`）发 `ACTION` / `COUNTER` / **`REORDER_TOP`** / **`REINSERT_TRIBULATION`** / `ENDED`；前端内部 `Phase` 是 `ACTION`/`COUNTER`/`REORDER`/`REINSERT`/`ENDED`。曾用「白名单包含即用，否则回落 `ACTION`」实现 ⇒ `REORDER_TOP`/`REINSERT_TRIBULATION` **永远匹配不上**，按 phase 驱动的排序/回插弹窗在真后端下永不弹出（mock 因自带内部名而掩盖）。**约定**：`src/api/game.ts` 必须用**显式映射表**（`PHASE_FROM_API`）转换，且新增 phase 时两端同步；判断「该弹窗该不该出现」一律以 `legal_actions` 为准，`phase` 只用于文案。 |
 
+| A15 | 反应牌在 `KIND_TO_CARD` 里要不要登记（`PLAY_COUNTER` / `PLAY_SKIP`） | **要**。`KIND_TO_CARD` 不能只收「主动牌」：它同时决定 ① `legal_action_dicts()` 给动作条目带不带 `card_instance_id` ② 事件层补不补 `CARD_PLAYED`。此前只登记了 `PLAY_SKIP`（遁术）而漏了 `PLAY_COUNTER`（反制符），后果是两处不一致：反制符条目 `card_instance_id=null`（遁术有句柄），且**不发** `CARD_PLAYED(COUNTER)`——而契约 §13 / A13 都规定「反制 = `CARD_PLAYED`(COUNTER) → `COUNTER_USED` → …」，离线 mock 反而照契约发了。已补上。**安全性依据**：动作合法性由 `Phase` 把关（`legal_actions()` 里 `phase == Phase.COUNTER` 才给这两条），且 `_step_action` 遇到 `PLAY_COUNTER` 会落到 `raise RuntimeError("未处理动作")`——所以登记它不会让反应牌变成可主动使用。改这张表时**必须同时检查它的反表 `CARD_TO_KIND` 的消费点**（`action_from_dict()` 用它从牌句柄反推动作）。 |
+
 ---
 
 ## 变更记录
@@ -621,3 +623,5 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 | 2026-09-12 | §3.5 载入预算拆成「懒加载 ≤5 s（部署/首请求）/ 全量展开 ≤10 s（续训）」 | 两种路径用途不同；且实测全量展开的墙钟时间主要受进程内存状态与 CPU 争用影响，原一刀切的 5 s 口径会得出误导性结论 |
 | 2026-09-13 | 附录 A13：三张卡牌规则按用户提供的前端原型文案调整（观星术 + 改序 / 遁术 → 反应牌 / 反制符 取消 → 反弹），同步 §1.1 §1.3 §1.7 与 `docs/API_CONTRACT.md` §12.3 §12.4 §13 §14 §18 | 用户裁决「卡牌功能以原型文案为准」；参考实现只读、不跟随，故必须显式记录**有意偏离**并收窄对照测试口径 |
 | 2026-09-13 | 附录 A14：后端 `phase` 线上值与前端内部枚举名必须显式映射（`REORDER_TOP`/`REINSERT_TRIBULATION`） | 前端白名单式转换把两个阶段静默回落成 `ACTION`，导致真后端下排序/回插弹窗永不出现（mock 掩盖了该问题） |
+| 2026-09-13 | 附录 A15：反应牌也要登记进 `KIND_TO_CARD`（补 `PLAY_COUNTER`） | 实现与契约 §13/A13 不一致：真后端不发 `CARD_PLAYED`(反制符)、且反制符条目的 `card_instance_id` 为 null，而 mock 照契约发了——同一类「mock 与真后端漂移」问题 |
+| 2026-09-13 | 事件合成：化解天劫那一步不再发 `TURN_ENDED`（`if not defused:` 守卫） | 同一回合出现两条 `TURN_ENDED`（实测 6 条 / 5 回合）；回合真正推进在提交回插位置之后，判定依据是 `turn_no`/`current_player` 而非日志 |
