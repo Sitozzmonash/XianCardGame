@@ -1,215 +1,132 @@
-import { router } from 'expo-router';
-import Head from 'expo-router/head';
-import { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
-
-import { ScreenBackground } from '@/components/layout/ScreenBackground';
-import { ResultActions, ResultBadge, ResultRanking, ResultStatBlock, rankingOf, resultStatsOf } from '@/components/result';
-import { Badge } from '@/components/ui/Badge';
-import { Banner } from '@/components/ui/Banner';
-import { useGameStore } from '@/store/game-store';
-import { colors } from '@/theme/colors';
-import { spacing } from '@/theme/spacing';
-import { fontFamily, text } from '@/theme/typography';
-
 /**
- * 「天劫试炼 · 结算」（fig4_1 1:1，墨玉色板）
- *   小标题「天劫试炼」→ 主文案「渡劫成功 / 渡劫失败」→ 圆形徽记 + 胜者名 + 「最后存活 · 证道成功」
- *   → 统计三列（回合 / 出牌 / 渡劫）→ 最终名次列表 → 「再来一局」/「返回主页」。
- * 所有数值取自真实 GameView；拿不到的指标显示「—」，绝不编造胜者或数据。
+ * 「结算」（`/result`）—— 参考原型 `docs/reference-next/components/screens/ResultScreen.tsx` 的 1:1 RN 移植。
+ *
+ * 逐段对应（参考行号 → 本文件 / 组件）：
+ *   29-41  TopBar(eyebrow 天劫试炼 / title 渡劫成功｜道消身殒 / 右侧胶囊)  → `<TopBar>` + `StatusPill`
+ *   44-56  MagicCircle 240 + 胜者头像 80 + 名字 24px + 副标题 11px        → `<ResultHero>`
+ *   58-65  Panel 统计三列（回合 / 出牌 / 渡劫，1px 分隔线）                → `<ResultStats>`
+ *   67-83  最终排名（名次 + 名字 + 存活/淘汰 tag）                        → `<ResultRanking>`
+ *   86-89  底栏两列「再来一局 / 返回主页」                                → `<BottomBar>` + 两个按钮
+ *
+ * 数据（**不编造**）：`useGameStore().view`（真实 `GameView`）。
+ *   回合 = `public.round`；出牌 = `public.discard_count`；渡劫 = 事件流里的 `TRIBULATION_DRAWN`
+ *   （无权威单字段，口径与下界说明见 `result-data.ts` 文件头）；胜负 = `winner` + `public.players[].alive`。
+ * 两处与参考不同，都是因为原型吃写死的 `MOCK_RESULT`：
+ *   ① 参考右侧「切换结局」是调试开关（取反 `success`）——真数据下胜者由后端裁定，不做假按钮，
+ *      该槽位只在**对局尚未结束**时挂一个如实的「对局进行中」胶囊；
+ *   ② 参考头像写死 `seat={4}`，这里用真实胜者座位（头像渐变按 seat 轮转）。
+ *
+ * 直接访问 `/result`（没有对局数据）→ 立即重定向回首页，绝不显示假数据。
  */
+
+import Head from 'expo-router/head';
+import { router } from 'expo-router';
+import { useEffect, useRef } from 'react';
+import { StyleSheet, View } from 'react-native';
+
+import {
+  BottomBar,
+  ScreenShell,
+  ScrollBody,
+} from '@/components/ref/ScreenShell';
+import { PrimaryButton, SecondaryButton, TopBar } from '@/components/ref/primitives';
+import {
+  ResultHero,
+  ResultRanking,
+  ResultStats,
+  StatusPill,
+  rankingOf,
+  resolveOutcome,
+  resultStatsOf,
+} from '@/components/ref/screens/result';
+import { useGameStore } from '@/store/game-store';
+import { sp } from '@/theme/ref';
+
 export default function ResultScreen() {
   const view = useGameStore((state) => state.view);
-  const setup = useGameStore((state) => state.setup);
-  const createGame = useGameStore((state) => state.createGame);
   const clearGame = useGameStore((state) => state.clearGame);
-  const isSubmitting = useGameStore((state) => state.isSubmitting);
-  const battleLog = useGameStore((state) => state.battleLog);
-  const error = useGameStore((state) => state.error);
-  const clearError = useGameStore((state) => state.clearError);
-
-  const [starting, setStarting] = useState(false);
+  /** 主动离开（再来一局 / 返回主页）时不要把重定向又拉回首页 */
+  const leavingRef = useRef(false);
 
   useEffect(() => {
-    if (!view) router.replace('/');
+    if (!view && !leavingRef.current) router.replace('/');
   }, [view]);
 
-  if (!view) {
+  const outcome = view ? resolveOutcome(view) : null;
+  const stats = view ? resultStatsOf(view) : [];
+  const ranking = view ? rankingOf(view) : [];
+
+  /** 再来一局：清掉旧对局（DELETE /games/{id} + 复位 store），回到配置页重新开局 */
+  const replay = () => {
+    leavingRef.current = true;
+    clearGame();
+    router.replace('/setup');
+  };
+
+  /** 返回主页：同样清掉旧对局 */
+  const home = () => {
+    leavingRef.current = true;
+    clearGame();
+    router.replace('/');
+  };
+
+  if (!view || !outcome) {
+    // 没有对局数据：`useEffect` 正在重定向回首页，这里只渲染空壳（不显示假数据）
     return (
-      <ScreenBackground variant="plain" contentStyle={styles.emptyContent}>
+      <ScreenShell variant="plain">
         <Head>
           <title>对局结算 · 修仙卡牌</title>
         </Head>
-        <View style={styles.emptyWrap}>
-          <Text style={styles.eyebrow}>天劫试炼</Text>
-          <Text style={styles.emptyTitle}>尚无结算数据</Text>
-          <Text style={styles.emptyHint}>请先开始一局试炼。</Text>
-          <ResultActions onRestart={() => router.replace('/setup')} onHome={() => router.replace('/')} />
-        </View>
-      </ScreenBackground>
+        <TopBar eyebrow="天劫试炼" title="天机未定" />
+        <ScrollBody>
+          <View style={styles.placeholder} />
+        </ScrollBody>
+      </ScreenShell>
     );
   }
 
-  const winnerId = typeof view.winner === 'number' && view.winner >= 0 ? view.winner : null;
-  const winner = view.public.players.find((player) => player.player_id === winnerId);
-  const iWon = winnerId !== null && winnerId === view.viewer_player_id;
-  const ended = view.status === 'ended' || view.phase === 'ENDED';
-
-  const headline = winnerId === null ? '天机未定' : iWon ? '渡劫成功' : '渡劫失败';
-  const winnerName = winner?.name ?? (winnerId === null ? '无人生还' : `P${winnerId}`);
-  const subtitle =
-    winnerId === null ? '本局平局 · 无胜者' : iWon ? '最后存活 · 证道成功' : `${winnerName} 最后存活 · 证道成功`;
-
-  const stats = resultStatsOf({ view, log: battleLog });
-  const ranking = rankingOf(view);
-  const me = view.public.players.find((player) => player.player_id === view.viewer_player_id);
-
-  const restart = async () => {
-    setStarting(true);
-    const gameId = await createGame(setup);
-    setStarting(false);
-    if (gameId) router.replace('/battle');
-  };
-
   return (
-    <ScreenBackground variant="plain" scroll contentStyle={styles.content}>
+    <ScreenShell variant="plain">
       <Head>
         <title>对局结算 · 修仙卡牌</title>
       </Head>
 
-      <View style={styles.inner} testID="result-screen">
-        {/* 小标题：设计 y 38-50，左对齐 x 28.5 */}
-        <Text style={styles.eyebrow}>天劫试炼</Text>
+      <TopBar
+        eyebrow="天劫试炼"
+        title={outcome.title}
+        right={outcome.live ? <StatusPill>对局进行中</StatusPill> : undefined}
+      />
 
-        {/* 主文案：设计 y 69.5-119.5，居中，字号 ≈44 */}
-        <Text
-          style={[styles.headline, iWon ? styles.headlineWin : winnerId === null ? null : styles.headlineLose]}
-          testID="result-headline"
-        >
-          {headline}
-        </Text>
-
-        <Banner message={error} onDismiss={clearError} />
-
-        {!ended ? (
-          <View style={styles.noticeRow}>
-            <Badge label={`对局状态 ${view.status}`} tone="muted" />
-            <Text style={styles.noticeText}>本局尚未结束，以下为当前实时局面。</Text>
-          </View>
-        ) : null}
-
-        {/* 徽记 + 胜者名 + 副标题（设计 y 171-413） */}
-        <ResultBadge name={winnerName} subtitle={subtitle} />
-
-        {/* 统计三列（设计 y 448-563.5） */}
-        <ResultStatBlock stats={stats} />
-
-        {/* 最终排名（设计标题 y 596-610 + 行 y 628-792） */}
-        <Text style={styles.sectionTitle}>最终排名</Text>
-        <ResultRanking players={ranking} />
-
-        <View style={styles.spacer} />
-
-        <ResultActions
-          onRestart={() => void restart()}
-          onHome={() => {
-            clearGame();
-            router.replace('/');
-          }}
-          restarting={starting || isSubmitting}
+      <ScrollBody style={styles.body} contentStyle={styles.bodyContent}>
+        <ResultHero
+          name={outcome.name}
+          subtitle={outcome.subtitle}
+          seat={outcome.seat}
+          tone={outcome.tone}
         />
+        <ResultStats stats={stats} />
+        <ResultRanking entries={ranking} />
+      </ScrollBody>
 
-        <Text style={styles.footnote}>
-          回合 / 出牌取自 GameView.public（round、discard_count）；渡劫取自本局事件流中的 TRIBULATION_*
-          事件；胜负与淘汰全部由后端裁定。{me && !me.alive ? ' 你已被淘汰。' : ''}
-        </Text>
-      </View>
-    </ScreenBackground>
+      <BottomBar>
+        <View style={styles.actions}>
+          <PrimaryButton style={styles.action} onPress={replay}>
+            再来一局
+          </PrimaryButton>
+          <SecondaryButton style={styles.action} onPress={home}>
+            返回主页
+          </SecondaryButton>
+        </View>
+      </BottomBar>
+    </ScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  content: {
-    flex: 1,
-  },
-  emptyContent: {
-    flex: 1,
-  },
-  inner: {
-    width: '100%',
-    flexGrow: 1,
-    paddingHorizontal: 12,
-    paddingTop: 38,
-    paddingBottom: 4,
-  },
-  eyebrow: {
-    fontFamily: fontFamily.body,
-    fontSize: 13,
-    letterSpacing: 4,
-    color: colors.goldLight,
-  },
-  headline: {
-    fontFamily: fontFamily.title,
-    fontSize: 44,
-    lineHeight: 50,
-    fontWeight: '700',
-    letterSpacing: 8,
-    textAlign: 'center',
-    color: colors.text,
-    marginTop: 18,
-  },
-  headlineWin: {
-    color: colors.goldLight,
-  },
-  headlineLose: {
-    color: colors.danger,
-  },
-  noticeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginTop: spacing.md,
-  },
-  noticeText: {
-    ...text.caption,
-    flexShrink: 1,
-  },
-  sectionTitle: {
-    fontFamily: fontFamily.title,
-    fontSize: 15,
-    fontWeight: '700',
-    letterSpacing: 3,
-    color: colors.goldLight,
-    marginTop: 28,
-    marginBottom: 0,
-  },
-  spacer: {
-    flexGrow: 1,
-    minHeight: 8,
-  },
-  footnote: {
-    fontFamily: fontFamily.body,
-    fontSize: 10,
-    lineHeight: 15,
-    color: colors.textFaint,
-    marginTop: 16,
-  },
-  emptyWrap: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
-    gap: spacing.sm,
-  },
-  emptyTitle: {
-    fontFamily: fontFamily.title,
-    fontSize: 30,
-    fontWeight: '700',
-    letterSpacing: 4,
-    color: colors.text,
-  },
-  emptyHint: {
-    ...text.caption,
-    textAlign: 'center',
-  },
+  /** 参考主体是 `px-5 pb-6 pt-6`：`ScrollBody` 默认 pt-5，这里把 24px 交给 contentContainer */
+  body: { paddingTop: 0 },
+  bodyContent: { paddingTop: sp(6) },
+  actions: { flexDirection: 'row', gap: sp(3) },
+  action: { flex: 1 },
+  placeholder: { height: 1 },
 });

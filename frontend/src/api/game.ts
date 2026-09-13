@@ -28,6 +28,38 @@ import type { GameEvent } from '@/types/event';
 
 const PHASES: Phase[] = ['ACTION', 'COUNTER', 'REORDER', 'REINSERT', 'ENDED'];
 
+/**
+ * 后端 `PHASE_API_NAME`（`backend/game/state.py:87`）→ 前端内部 Phase 名。
+ *
+ * ⚠️ 两端命名**不同**，必须显式映射（曾经这里只有一张白名单，`REORDER_TOP` /
+ * `REINSERT_TRIBULATION` 不在表内就被静默回落成 `ACTION`，导致「按 phase 判断」的
+ * 排序/回插弹窗在真后端下永不弹出）：
+ *
+ * | 后端（线上值） | 前端内部 |
+ * |---|---|
+ * | `ACTION` | `ACTION` |
+ * | `COUNTER` | `COUNTER` |
+ * | `REORDER_TOP` | `REORDER` |
+ * | `REINSERT_TRIBULATION` | `REINSERT` |
+ * | `ENDED` | `ENDED` |
+ */
+const PHASE_FROM_API: Record<string, Phase> = {
+  ACTION: 'ACTION',
+  COUNTER: 'COUNTER',
+  REORDER_TOP: 'REORDER',
+  REINSERT_TRIBULATION: 'REINSERT',
+  ENDED: 'ENDED',
+};
+
+function normalizePhase(value: unknown): Phase {
+  const raw = typeof value === 'string' ? value : '';
+  const mapped = PHASE_FROM_API[raw];
+  if (mapped) return mapped;
+  // 兼容已经用内部名的来源（如 mock 自身），避免二次映射
+  if ((PHASES as string[]).includes(raw)) return raw as Phase;
+  return 'ACTION';
+}
+
 function asNumber(value: unknown, fallback = 0): number {
   const parsed = typeof value === 'string' ? Number.parseFloat(value) : value;
   return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : fallback;
@@ -35,11 +67,6 @@ function asNumber(value: unknown, fallback = 0): number {
 
 function asString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
-}
-
-function normalizePhase(value: unknown): Phase {
-  const phase = asString(value, 'ACTION') as Phase;
-  return PHASES.includes(phase) ? phase : 'ACTION';
 }
 
 function normalizeObservation(raw: unknown): Observation {

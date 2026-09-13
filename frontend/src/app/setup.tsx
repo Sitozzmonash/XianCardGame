@@ -1,96 +1,74 @@
 /**
- * 对战配置（fig4_0，墨玉色板）—— 按设计原图 430×888 画布 1:1 还原。
+ * 对战配置 —— 参考原型 `docs/reference-next/components/screens/BattleSetupScreen.tsx` 的 1:1 移植。
  *
- * 设计原图结构（鎏金分隔线实测 y，见 design.ts）：标题「天劫试炼」+「对战配置」
- * → 玩家人数（2–6 单选）→ 座位与对手（头像/名字/副标签/右侧角色标签）
- * → AI 参数（ISMCTS simulations / MCCFR 模型）→ 主按钮「开始对战」+ 次按钮「返回」。
+ * 对应关系（参考行号 → 本文件）：
+ *   37        `<GameBackdrop variant="plain" />`            → ScreenShell 自带
+ *   39        `TopBar(天劫试炼 / 对战配置 / 返回)`            → 第 4 行
+ *   41        `flex-1 space-y-5 px-5 pb-6 pt-5`             → `ScrollBody`（gap 20）
+ *   42–50     `玩家人数` + 2–6 胶囊                          → 第 5–7 行
+ *   52–59     `座位与对手` + N 行 `PlayerPanel`              → 第 8–10 行
+ *   61–83     `AI 参数` Panel（ISMCTS simulations / MCCFR 模型）→ 第 11–13 行
+ *   86–96     底栏 `开始对战` + `返回`（`border-t gold-500/15 px-5 py-4 backdrop-blur-sm`）
+ *             → 第 15–19 行
  *
- * 契约（API_CONTRACT §6，POST /games）：
- *   players == agents.length 且 human_player 位置必须为 null，其余座位必须给 agent；
- *   mccfr 座位的 model 必须是 `GET /agents` 给出的真实引用，且**按人数过滤**
- *   （模型按人数训练，2 人模型放进 3 人局会 100% 回落 Rule 且界面无异常）。
+ * 接真后端：
+ *   - `GET /agents`（`@/api/game` 的 `fetchAgents`）取 MCCFR 模型清单，**按人数过滤**
+ *     （模型按人数训练，跨人数会 100% 回落 Rule 且界面看不出异常）；
+ *   - `POST /games` 走 store 的 `createGame()`（内部带 revision/错误处理），成功后 `router.replace('/battle')`；
+ *   - 失败/演示数据/MCCFR 清单不可用都在底部给出可关闭的提示，绝不静默。
  *
- * URL 参数（供 AI 实验室等入口真跳转，`/setup?from=ai-lab&players=5&ismcts=1000`）：
- *   首次挂载时应用一次，优先级 URL > store > 默认值；越界钳位并给出可关闭的提示；
- *   之后用户手动改动不会被 URL 弹回去（用 ref 标记已应用）。
+ * 与参考的差异（仅数据来源与必要的失败可见性，版式/文案未动）：参考里 MCCFR 选项是写死的
+ * `['100K','500K','Champion']`，这里换成真清单里的模型名；`/setup?players=…&ismcts=…&mccfr=…&from=ai-lab`
+ * 的既有入口参数仍会被应用一次（AI 实验室的 hand-off 不能断）。
  */
-import { router, useLocalSearchParams } from 'expo-router';
+
 import Head from 'expo-router/head';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  useWindowDimensions,
-  View,
-} from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Text, View } from 'react-native';
 
-import { isRuntimeMockOverride } from '@/api/client';
-import { fetchAgents } from '@/api/game';
-import { Banner } from '@/components/ui/Banner';
-import { PrimaryButton } from '@/components/ui/PrimaryButton';
+import { PlayerPanel } from '@/components/ref/PlayerPanel';
+import type { AIKind } from '@/components/ref/PlayerPanel';
+import { BottomBar, ScreenShell, ScrollBody } from '@/components/ref/ScreenShell';
+import { Panel, PrimaryButton, SecondaryButton, SectionTitle, SegmentedSelector, TopBar } from '@/components/ref/primitives';
 import {
-  matchMccfrParam,
-  noModelHint,
-  ParamChips,
-  PlayerCountSelector,
+  buildSeats,
+  ISMCTS_SIM_OPTIONS,
+  loadMccfrOptions,
+  PLAYER_COUNTS,
   resolveMccfrSelection,
-  SeatRow,
-  SectionHeader,
-  SETUP_GEOMETRY,
-  SetupHeader,
+  SetupNotice,
   toMccfrOptions,
-  type ChipOption,
-  type MccfrModelOption,
-} from '@/components/setup';
-import { SETUP_HUMAN_PORTRAIT } from '@/components/setup/assets';
-import { DEFAULT_SETUP, MOCK_HUMAN_SEAT, useGameStore } from '@/store/game-store';
-import type { SetupConfig } from '@/store/game-store';
-import { colors } from '@/theme/colors';
-import { fontFamily } from '@/theme/typography';
-import type { AgentInfo } from '@/types/card';
+  withKind,
+  type MccfrOption,
+  type NoticeItem,
+} from '@/components/ref/screens/setup';
+import { creamFaint, sp, track } from '@/theme/ref';
+import { sans } from '@/theme/refFonts';
+import { MOCK_HUMAN_SEAT, useGameStore, type SetupConfig } from '@/store/game-store';
 
-const AGENT_TYPES = ['rule', 'ismcts', 'random', 'mccfr'] as const;
-const SIM_PRESETS = [100, 500, 1000, 2000] as const;
-const DESIGN_WIDTH = 430;
 /** 后端对 ISMCTS 模拟次数的钳位上界（backend/app/services/agent_factory.py） */
 const ISMCTS_MAX = 2000;
-const ISMCTS_MIN = 1;
 
-const AGENT_LABEL: Record<string, string> = {
-  human: 'Human',
-  rule: 'Rule',
-  ismcts: 'ISMCTS',
-  random: 'Random',
-  mccfr: 'MCCFR',
-};
-
-const SEATS = [
-  { name: '我', initial: '虚' },
-  { name: '玄墨真人', initial: '墨' },
-  { name: '清月仙子', initial: '月' },
-  { name: '玄机子', initial: '机' },
-  { name: '赤霄君', initial: '霄' },
-  { name: '素心娘子', initial: '素' },
-] as const;
+type ModelState = 'loading' | 'ok' | 'error';
 
 function firstParam(value: string | string[] | undefined): string {
   if (Array.isArray(value)) return value[0] ?? '';
   return typeof value === 'string' ? value : '';
 }
 
-export default function SetupScreen() {
-  const insets = useSafeAreaInsets();
-  const { width: windowWidth } = useWindowDimensions();
+function baseName(path: string): string {
+  return (path.split(/[\\/]/).pop() ?? path).toLowerCase();
+}
+
+export default function BattleSetupScreen() {
   const params = useLocalSearchParams<{
     from?: string;
     players?: string;
     ismcts?: string;
     mccfr?: string;
     seat?: string;
+    seed?: string;
   }>();
 
   const storedSetup = useGameStore((state) => state.setup);
@@ -98,65 +76,61 @@ export default function SetupScreen() {
   const createGame = useGameStore((state) => state.createGame);
   const isSubmitting = useGameStore((state) => state.isSubmitting);
   const error = useGameStore((state) => state.error);
+  const notice = useGameStore((state) => state.notice);
   const clearError = useGameStore((state) => state.clearError);
   const mockMode = useGameStore((state) => state.mockMode);
   const enableDemoMode = useGameStore((state) => state.enableDemoMode);
+  const disableDemoMode = useGameStore((state) => state.disableDemoMode);
 
   const [config, setConfig] = useState<SetupConfig>(storedSetup);
-  /** 页面可用宽度由根节点 onLayout 实测（静态导出下 useWindowDimensions 可能滞留 0） */
-  const [availW, setAvailW] = useState(0);
-  const [modelState, setModelState] = useState<'loading' | 'ok' | 'error'>('loading');
-  const [allModels, setAllModels] = useState<MccfrModelOption[]>([]);
-  const [showRequest, setShowRequest] = useState(false);
-  /** 人数/清单变化导致模型被重置时给用户看的一句话（避免静默改配置） */
-  const [resetNotice, setResetNotice] = useState('');
-  /** URL 参数越界/无法解析的提示 */
-  const [queryNotice, setQueryNotice] = useState('');
-  /** 来自 AI 实验室的入口横幅（可关闭） */
-  const [fromLab, setFromLab] = useState('');
-  /** URL 里带的人群 id/路径，等 GET /agents 清单到位后再解析 */
-  const pendingMccfrRef = useRef<string>('');
-  const queryAppliedRef = useRef(false);
-  /** 首次解析（把 store/默认值对齐到真实清单）静默进行，不弹提示 */
-  const firstResolveRef = useRef(true);
+  const [models, setModels] = useState<MccfrOption[]>([]);
+  const [modelState, setModelState] = useState<ModelState>('loading');
+  const [resetNote, setResetNote] = useState('');
+  const [handoffNote, setHandoffNote] = useState('');
+  const [queryNote, setQueryNote] = useState('');
+  const [dismissed, setDismissed] = useState<string[]>([]);
 
-  const mock = mockMode;
-  const humanSeat = mock ? MOCK_HUMAN_SEAT : config.humanPlayer;
+  /** URL 参数只应用一次（之后用户的手动改动不会被弹回去） */
+  const queryAppliedRef = useRef(false);
+  /** URL 指定的模型，等清单到位后再解析 */
+  const pendingMccfrRef = useRef('');
+  /** 首次把 store/默认值对齐到真实清单是静默的，之后的重置才提示 */
+  const firstResolveRef = useRef(true);
 
   const patch = useCallback((value: Partial<SetupConfig>) => {
     setConfig((current) => ({ ...current, ...value }));
   }, []);
 
-  // ---------------- GET /agents → MCCFR 模型清单 ----------------
+  // ------------------------------------------------------------ GET /agents
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
     setModelState('loading');
-    fetchAgents()
-      .then((agents: AgentInfo[]) => {
-        if (!mounted) return;
-        setAllModels(toMccfrOptions(agents));
+    loadMccfrOptions()
+      .then((options) => {
+        if (!alive) return;
+        setModels(options);
         setModelState('ok');
       })
       .catch(() => {
-        if (mounted) {
-          setAllModels([]);
-          setModelState('error');
-        }
+        if (!alive) return;
+        setModels([]);
+        setModelState('error');
       });
     return () => {
-      mounted = false;
+      alive = false;
     };
   }, [mockMode]);
 
-  // ---------------- URL 参数（只应用一次） ----------------
+  // ------------------------------------------------------------ URL 参数（一次）
   useEffect(() => {
     if (queryAppliedRef.current) return;
+    const rawFrom = firstParam(params.from).trim();
     const rawPlayers = firstParam(params.players).trim();
     const rawIsmcts = firstParam(params.ismcts).trim();
     const rawSeat = firstParam(params.seat).trim();
     const rawMccfr = firstParam(params.mccfr).trim();
-    const rawFrom = firstParam(params.from).trim();
-    if (!rawPlayers && !rawIsmcts && !rawSeat && !rawMccfr && !rawFrom) return;
+    const rawSeed = firstParam(params.seed).trim();
+    if (!rawFrom && !rawPlayers && !rawIsmcts && !rawSeat && !rawMccfr && !rawSeed) return;
     queryAppliedRef.current = true;
 
     const notes: string[] = [];
@@ -166,164 +140,185 @@ export default function SetupScreen() {
     let players = config.players;
     if (rawPlayers) {
       const parsed = Number.parseInt(rawPlayers, 10);
-      if (!Number.isFinite(parsed)) {
-        notes.push(`players=${rawPlayers} 无法解析为数字，已忽略`);
-      } else if (parsed < 2 || parsed > 6) {
+      if (!Number.isFinite(parsed)) notes.push(`players=${rawPlayers} 无法解析为数字，已忽略`);
+      else {
         players = Math.min(6, Math.max(2, parsed));
         next.players = players;
-        notes.push(`players=${parsed} 超出 2–6，已夹到 ${players}`);
-      } else {
-        players = parsed;
-        next.players = players;
+        applied.push(`人数 ${players}`);
       }
     }
-
     if (rawIsmcts) {
       const parsed = Number.parseInt(rawIsmcts, 10);
-      if (!Number.isFinite(parsed) || parsed < ISMCTS_MIN) {
-        notes.push(`ismcts=${rawIsmcts} 非法，已忽略`);
-      } else if (parsed > ISMCTS_MAX) {
-        next.ismctsSimulations = ISMCTS_MAX;
-        notes.push(`ismcts=${parsed} 超过后端钳位上界，已夹到 ${ISMCTS_MAX}`);
-      } else {
-        next.ismctsSimulations = parsed;
+      if (!Number.isFinite(parsed) || parsed < 1) notes.push(`ismcts=${rawIsmcts} 非法，已忽略`);
+      else {
+        next.ismctsSimulations = Math.min(ISMCTS_MAX, parsed);
+        applied.push(`ISMCTS ${next.ismctsSimulations}`);
+        if (parsed > ISMCTS_MAX) notes.push(`ismcts=${parsed} 超过后端上界，已夹到 ${ISMCTS_MAX}`);
       }
     }
-
     if (rawSeat) {
       const parsed = Number.parseInt(rawSeat, 10);
-      if (!Number.isFinite(parsed) || parsed < 0 || parsed >= players) {
-        notes.push(`seat=${rawSeat} 超出 0–${players - 1}，已忽略`);
-      } else {
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed >= players) notes.push(`seat=${rawSeat} 超出 0–${players - 1}，已忽略`);
+      else {
         next.humanPlayer = parsed;
+        applied.push(`真人座位 P${parsed}`);
       }
     }
+    if (rawMccfr) {
+      pendingMccfrRef.current = rawMccfr;
+      applied.push(`模型 ${rawMccfr}`);
+    }
+    if (rawSeed) {
+      // 复现同一局（同 seed + 同人数 + 同对手策略 → 同牌序与同 AI 决策）。
+      // 用于 QA 复现与取证：`/setup?players=2&seed=6`
+      const parsed = Number.parseInt(rawSeed, 10);
+      if (!Number.isFinite(parsed) || parsed < 0) notes.push(`seed=${rawSeed} 非法，已忽略`);
+      else {
+        next.seed = String(parsed);
+        applied.push(`随机种子 ${parsed}`);
+      }
+    }
+    if (rawFrom) applied.push(`来源 ${rawFrom}`);
 
-    if (rawMccfr) pendingMccfrRef.current = rawMccfr;
-
-    if (next.players !== undefined) applied.push(`人数 ${next.players}`);
-    if (next.ismctsSimulations !== undefined) applied.push(`ISMCTS ${next.ismctsSimulations}`);
-    if (next.humanPlayer !== undefined) applied.push(`真人座位 P${next.humanPlayer}`);
-    if (rawMccfr) applied.push(`模型 ${rawMccfr}`);
-    if (applied.length > 0) setFromLab(applied.join(' · '));
-    if (notes.length > 0) setQueryNotice(notes.join('；'));
-
+    if (applied.length > 0) setHandoffNote(applied.join(' · '));
+    if (notes.length > 0) setQueryNote(notes.join('；'));
     if (Object.keys(next).length > 0) patch(next);
-    // 只在挂载时应用一次；用户之后的手动修改不会被 URL 覆盖（刷新才会重新应用）
+    // 只在挂载时应用一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /**
-   * 人数变化 / 模型清单变化 → 重新解析 MCCFR 选中项。
-   * 当前选中项不在候选里（典型：人数变了）→ 自动重置到第一个匹配项；
-   * 一个匹配项都没有 → 清空，并把仍在用 mccfr 的座位降级回 rule
-   * （否则契约里会带一个命中率 0% 的模型，且界面上什么都看不出来）。
-   */
+  // ------------------------------------------------------------ 人数/清单 → 重选模型
   useEffect(() => {
     if (modelState !== 'ok') return;
-
-    // URL 里指定的模型优先：能在真实清单里找到才用，找不到就忽略
     const wanted = pendingMccfrRef.current;
+    pendingMccfrRef.current = '';
+
+    let preferred = config.mccfrModel;
     if (wanted) {
-      pendingMccfrRef.current = '';
-      const hit = matchMccfrParam(allModels, wanted);
-      if (hit && hit.value !== config.mccfrModel) {
-        patch({ mccfrModel: hit.value });
-        setResetNotice(`已按 URL 参数选用模型「${hit.label}」。`);
-        return;
-      }
-      setQueryNotice((prev) =>
-        prev ? `${prev}；mccfr=${wanted} 不在 GET /agents 清单里，已忽略` : `mccfr=${wanted} 不在 GET /agents 清单里，已忽略`,
+      const hit = models.find(
+        (option) =>
+          option.value === wanted ||
+          option.value.toLowerCase() === wanted.toLowerCase() ||
+          baseName(option.value) === baseName(wanted),
       );
+      if (hit) preferred = hit.value;
+      else setQueryNote((prev) => `${prev ? `${prev}；` : ''}mccfr=${wanted} 不在 GET /agents 清单里，已忽略`);
     }
 
-    const { value, changed } = resolveMccfrSelection(allModels, config.players, config.mccfrModel);
-    const danglingSeats = config.agentTypes
-      .slice(0, config.players)
-      .some((type, seat) => seat !== humanSeat && type === 'mccfr');
-
-    if (!changed && !(value.length === 0 && danglingSeats)) {
+    const { value, changed } = resolveMccfrSelection(models, config.players, preferred);
+    if (!changed) {
       firstResolveRef.current = false;
       return;
     }
-
     const silent = firstResolveRef.current;
     firstResolveRef.current = false;
     if (!silent) {
-      setResetNotice(
+      const label = models.find((option) => option.value === value)?.label ?? value;
+      setResetNote(
         value.length === 0
-          ? `已切到 ${config.players} 人：没有匹配的 MCCFR 模型，MCCFR 座位自动降级为 Rule。`
-          : `${config.players} 人的 MCCFR 模型已重置为「${value}」。`,
+          ? `已切到 ${config.players} 人：清单里没有匹配的 MCCFR 模型，MCCFR 座位请改用别的策略。`
+          : `${config.players} 人的 MCCFR 模型已重置为「${label}」。`,
       );
     }
-    patch({
-      mccfrModel: value,
-      agentTypes:
-        value.length === 0
-          ? config.agentTypes.map((type, seat) =>
-              seat < config.players && seat !== humanSeat && type === 'mccfr' ? 'rule' : type,
-            )
-          : config.agentTypes,
-    });
-  }, [allModels, modelState, config.players, config.mccfrModel, config.agentTypes, humanSeat, patch]);
+    patch({ mccfrModel: value });
+  }, [models, modelState, config.players, config.mccfrModel, patch]);
 
-  // 人数变化时，Human 座位不能越界
+  // 真人座位不能越界（人数变小时）
   useEffect(() => {
-    if (config.humanPlayer >= config.players) {
-      patch({ humanPlayer: config.players - 1 });
-    }
+    if (config.humanPlayer >= config.players) patch({ humanPlayer: config.players - 1 });
   }, [config.humanPlayer, config.players, patch]);
 
+  // ------------------------------------------------------------ 派生数据
+  const mock = mockMode;
+  const humanSeat = mock ? MOCK_HUMAN_SEAT : Math.min(config.humanPlayer, config.players - 1);
   const seats = useMemo(
-    () => Array.from({ length: config.players }, (_, index) => index),
-    [config.players],
+    () => buildSeats(config.players, humanSeat, config.agentTypes),
+    [config.players, humanSeat, config.agentTypes],
   );
 
-  const modelCandidates = useMemo(
-    () => resolveMccfrSelection(allModels, config.players, config.mccfrModel).options,
-    [allModels, config.players, config.mccfrModel],
+  const candidates = useMemo(
+    () => resolveMccfrSelection(models, config.players, config.mccfrModel).options,
+    [models, config.players, config.mccfrModel],
   );
-  const matchedCount = modelCandidates.filter((option) => option.players === config.players).length;
-  const hasModel = modelCandidates.length > 0;
-  const needManualModel = !hasModel || modelState === 'error';
-  const extra = needManualModel ? 38 : 0;
+  /** 重名时用完整引用兜底，保证「胶囊 → 模型」一一对应 */
+  const candidateLabels = useMemo(() => {
+    const raw = candidates.map((option) => option.label);
+    return candidates.map((option) => (raw.filter((label) => label === option.label).length > 1 ? option.value : option.label));
+  }, [candidates]);
+  const selectedLabel = useMemo(() => {
+    const index = candidates.findIndex((option) => option.value === config.mccfrModel);
+    return index >= 0 ? candidateLabels[index] : '';
+  }, [candidates, candidateLabels, config.mccfrModel]);
 
-  const ismctsOptions: ChipOption[] = SIM_PRESETS.map((value) => ({
-    label: String(value),
-    value: String(value),
-  }));
+  /** 用到 MCCFR 的非真人座位（这些座位需要真实模型，否则接口会 100% 回落 Rule） */
+  const mccfrSeats = seats.filter((seat) => !seat.isSelf && seat.kind === 'mccfr');
+  const needsModel = mccfrSeats.length > 0;
+  const modelMissing = needsModel && candidates.length === 0 && modelState !== 'loading';
+  const modelPending = needsModel && modelState === 'loading';
 
-  const mccfrOptions: ChipOption[] = modelCandidates.map((option) => ({
-    label: option.short,
-    value: option.value,
-    a11yLabel: `${option.players === undefined ? '训练人数未知' : `${option.players} 人`} · ${option.label}`,
-    mark: option.players === undefined ? '?' : undefined,
-  }));
+  const simOptions = useMemo<number[]>(() => {
+    const base: number[] = [...ISMCTS_SIM_OPTIONS];
+    return base.includes(config.ismctsSimulations)
+      ? base
+      : [...base, config.ismctsSimulations].sort((a, b) => a - b);
+  }, [config.ismctsSimulations]);
 
-  const selectedModel = modelCandidates.find((option) => option.value === config.mccfrModel);
+  // ------------------------------------------------------------ 运行期提示
+  const notices: NoticeItem[] = [];
+  if (error) {
+    notices.push({
+      id: `error:${error}`,
+      tone: 'error',
+      text: error,
+      actionLabel: mock ? undefined : '使用内置演示数据',
+      onAction: mock ? undefined : enableDemoMode,
+    });
+  }
+  if (modelState === 'error') {
+    notices.push({
+      id: 'models-error',
+      tone: 'error',
+      text: 'GET /agents 不可用：读不到 MCCFR 模型清单（其余座位仍可正常配置）。',
+    });
+  }
+  if (modelPending) {
+    notices.push({ id: 'models-pending', tone: 'notice', text: '正在读取 GET /agents 的模型清单…' });
+  }
+  if (modelMissing) {
+    notices.push({
+      id: `models-missing:${config.players}`,
+      tone: 'error',
+      text: `当前 ${config.players} 人没有可用的 MCCFR 模型（模型按人数训练）。请把 MCCFR 座位改成 Rule/ISMCTS/Random，或先训练模型。`,
+    });
+  }
+  if (resetNote) {
+    notices.push({ id: `reset:${resetNote}`, tone: 'notice', text: resetNote, actionLabel: '好', onAction: () => setResetNote('') });
+  }
+  if (handoffNote) {
+    notices.push({ id: `handoff:${handoffNote}`, tone: 'notice', text: `已应用入口参数：${handoffNote}`, actionLabel: '好', onAction: () => setHandoffNote('') });
+  }
+  if (queryNote) {
+    notices.push({ id: `query:${queryNote}`, tone: 'notice', text: queryNote, actionLabel: '好', onAction: () => setQueryNote('') });
+  }
+  if (notice) {
+    notices.push({ id: `store:${notice}`, tone: 'notice', text: notice, actionLabel: '好', onAction: clearError });
+  }
+  if (mock) {
+    notices.push({
+      id: 'mock-mode',
+      tone: 'notice',
+      text: '数据源：MOCK 演示数据（真人固定坐在 P0）。',
+      actionLabel: '切回真后端',
+      onAction: disableDemoMode,
+    });
+  }
+  const visibleNotices = notices.filter((item) => !dismissed.includes(item.id));
 
-  const mccfrNote = (() => {
-    if (modelState === 'loading') return '正在读取 GET /agents 的模型清单…';
-    if (modelState === 'error') return '接口 /agents 不可用：模型清单读取失败。';
-    if (!hasModel) return noModelHint(config.players);
-    if (selectedModel?.players === undefined)
-      return '该模型未标注训练人数（后端 /agents 未给 players 字段）。人数不匹配会导致 MCCFR 命中率 0% 并 100% 回落 Rule。';
-    return `模型：${config.mccfrModel}（训练人数 ${selectedModel.players} 人）`;
-  })();
+  // ------------------------------------------------------------ 动作
+  const goHome = () => router.replace('/');
 
-  const requestPreview = useMemo(() => {
-    const agents = seats.map((seat) =>
-      seat === humanSeat
-        ? null
-        : config.agentTypes[seat] === 'ismcts'
-          ? { type: 'ismcts', simulations: config.ismctsSimulations }
-          : config.agentTypes[seat] === 'mccfr'
-            ? { type: 'mccfr', model: config.mccfrModel }
-            : { type: config.agentTypes[seat] },
-    );
-    const seed = config.seed.trim().length > 0 ? Number.parseInt(config.seed.trim(), 10) || null : null;
-    return JSON.stringify({ players: config.players, human_player: humanSeat, agents, seed }, null, 2);
-  }, [config, seats, humanSeat]);
+  const onKindChange = (seat: number, kind: AIKind) =>
+    patch({ agentTypes: withKind(config.agentTypes, seat, kind) });
 
   const start = async () => {
     clearError();
@@ -332,431 +327,122 @@ export default function SetupScreen() {
     if (gameId) router.replace('/battle');
   };
 
-  // ---------------- 几何 ----------------
-  const g = SETUP_GEOMETRY;
-  /** 3 人及以下用设计原图坐标；4–6 人收紧行高并把下面段落整体下移 */
-  const rowH = config.players <= 3 ? 60 : 42;
-  const step = config.players <= 3 ? 92 : 52;
-  const seatsBottom = g.seats.first.y + (config.players - 1) * step + rowH;
-  const seatHintY = seatsBottom + 6;
-  const aiY = Math.max(g.ai.label.y, seatHintY + 16);
-  const shift = aiY - g.ai.label.y;
-  const primaryY = aiY + (g.primary.y - g.ai.label.y) + extra;
-  const secondaryY = aiY + (g.secondary.y - g.ai.label.y) + extra;
-  const utilityY = aiY + (g.utility.y - g.ai.label.y) + extra;
-  const canvasHeight = 888 + shift + extra;
-
-  const scale = useMemo(() => {
-    const base = availW > 0 ? availW : windowWidth > 0 ? windowWidth : DESIGN_WIDTH;
-    return Math.min(Math.max(base, 240), 480) / DESIGN_WIDTH;
-  }, [availW, windowWidth]);
-
-  const cycleAgent = (seat: number) => {
-    const current = config.agentTypes[seat] ?? 'rule';
-    const available = AGENT_TYPES.filter((type) => type !== 'mccfr' || hasModel);
-    const index = available.indexOf(current as (typeof AGENT_TYPES)[number]);
-    const next = available[(index + 1) % available.length];
-    patch({ agentTypes: config.agentTypes.map((value, i) => (i === seat ? next : value)) });
-  };
-
   return (
-    <View style={styles.root}>
+    <ScreenShell edges={['top', 'left', 'right', 'bottom']}>
       <Head>
         <title>对战配置 · 天劫试炼</title>
       </Head>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        <View
-          style={styles.measure}
-          onLayout={(event) => {
-            const next = Math.round(event.nativeEvent.layout.width);
-            if (next > 0 && next !== availW) setAvailW(next);
-          }}
-        />
-        <View style={{ width: '100%', maxWidth: 430, paddingHorizontal: 16, gap: 8 }}>
-          <Banner
-            tone="notice"
-            message={fromLab ? `已应用 AI 实验室的参数：${fromLab}` : ''}
-            onDismiss={() => setFromLab('')}
+      <TopBar eyebrow="天劫试炼" title="对战配置" onBack={goHome} />
+
+      <ScrollBody>
+        {/* 玩家人数 */}
+        <View style={styles.section}>
+          <SectionTitle>玩家人数</SectionTitle>
+          <SegmentedSelector
+            options={PLAYER_COUNTS}
+            value={config.players}
+            onChange={(players) => patch({ players })}
+            formatLabel={(count) => `${count} 人`}
           />
-          <Banner tone="error" message={queryNotice} onDismiss={() => setQueryNotice('')} />
         </View>
-        <View style={{ height: insets.top, width: 1 }} />
-        <View style={{ width: DESIGN_WIDTH * scale, height: canvasHeight * scale }}>
-          <View style={{ width: DESIGN_WIDTH, height: canvasHeight, transform: [{ scale }], transformOrigin: 'top left' }}>
-            <SetupHeader
-              right={
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="恢复默认配置"
-                  onPress={() => {
-                    setResetNotice('');
-                    setConfig({ ...DEFAULT_SETUP });
-                  }}
-                  style={({ pressed }) => [styles.headerAction, pressed ? styles.pressed : null]}
-                >
-                  <Text style={styles.headerActionText}>恢复默认</Text>
-                </Pressable>
-              }
-            />
 
-            <SectionHeader x={g.playerCount.label.x} y={g.playerCount.label.y} size={g.playerCount.label.size} label="玩家人数" />
-            <PlayerCountSelector
-              x={g.playerCount.control.x}
-              y={g.playerCount.control.y}
-              w={g.playerCount.control.w}
-              h={g.playerCount.control.h}
-              value={config.players}
-              onChange={(players) => patch({ players })}
-            />
-            <Text style={[styles.hint, { left: g.playerCount.hint.x, top: g.playerCount.hint.y, fontSize: g.playerCount.hint.size }]}>
-              支持 2–6 人；天劫固定 N−1 张，抽到且无护劫符即淘汰。
-            </Text>
+        {/* 座位与对手（前 N 行） */}
+        <View style={styles.section}>
+          <SectionTitle>座位与对手</SectionTitle>
+          <View style={styles.seatList}>
+            {seats.map((seat) => (
+              <PlayerPanel
+                key={seat.id}
+                seat={seat}
+                onKindChange={(kind) => onKindChange(seat.seat, kind)}
+              />
+            ))}
+          </View>
+        </View>
 
-            <SectionHeader x={g.seats.label.x} y={g.seats.label.y} size={g.seats.label.size} label="座位与对手" />
-            {seats.map((seat) => {
-              const isHuman = seat === humanSeat;
-              const agentType = isHuman ? 'human' : config.agentTypes[seat] ?? 'rule';
-              const profile = SEATS[seat] ?? { name: `道友 ${seat}`, initial: '道' };
-              return (
-                <SeatRow
-                  key={seat}
-                  x={g.seats.first.x}
-                  y={g.seats.first.y + seat * step}
-                  w={g.seats.first.w}
-                  h={rowH}
-                  seat={seat}
-                  name={isHuman ? `我（${profile.name === '我' ? '太虚真君' : profile.name}）` : profile.name}
-                  sublabel={isHuman ? `P${seat} · 玩家座位 · 真人` : `P${seat} · AI`}
-                  agentLabel={AGENT_LABEL[agentType] ?? agentType}
-                  isHuman={isHuman}
-                  portrait={isHuman ? SETUP_HUMAN_PORTRAIT : undefined}
-                  initial={profile.initial}
-                  agentDisabled={!isHuman && agentType === 'mccfr' && !hasModel}
-                  locked={mock}
-                  onMoveHere={() => patch({ humanPlayer: seat })}
-                  onCycleAgent={() => cycleAgent(seat)}
-                />
-              );
-            })}
-            <Text style={[styles.hint, { left: g.seats.hint.x, top: seatHintY, width: 378, fontSize: 9.5 }]}>
-              {mock
-                ? 'MOCK 模式固定 P0 为真人（mock 只产出该视角的 GameView）。'
-                : '点头像把「我」挪到该座位；点右侧标签切换该座位 AI 类型。human 位在 POST /games 里必须为 null。'}
-            </Text>
+        {/* AI 参数 */}
+        <Panel>
+          <View style={styles.panelBody}>
+            <SectionTitle>AI 参数</SectionTitle>
 
-            <SectionHeader x={g.ai.label.x} y={aiY} size={g.ai.label.size} label="AI 参数" />
-            <Text style={[styles.fieldLabel, { left: g.ai.ismctsLabel.x, top: aiY + (g.ai.ismctsLabel.y - g.ai.label.y), fontSize: g.ai.ismctsLabel.size }]}>
-              ISMCTS simulations（模拟次数）
-            </Text>
-            <ParamChips
-              x={g.ai.ismctsChips.x}
-              y={aiY + (g.ai.ismctsChips.y - g.ai.label.y)}
-              w={g.ai.ismctsChips.w}
-              h={g.ai.ismctsChips.h}
-              options={ismctsOptions}
-              value={String(config.ismctsSimulations)}
-              onChange={(value) => patch({ ismctsSimulations: Number.parseInt(value, 10) })}
-              groupLabel="ISMCTS simulations"
-            />
-
-            <View style={[styles.fieldRow, { left: g.ai.mccfrLabel.x, top: aiY + (g.ai.mccfrLabel.y - g.ai.label.y), width: g.ai.mccfrChips.w }]}>
-              <Text style={[styles.fieldLabel, { fontSize: g.ai.mccfrLabel.size }]}>MCCFR 模型</Text>
-              <Text style={styles.fieldSource}>
-                {modelState === 'ok'
-                  ? `来源 GET /agents · ${config.players} 人命中 ${matchedCount} 个 / 候选 ${modelCandidates.length} 个`
-                  : modelState === 'loading'
-                    ? '来源 GET /agents · 读取中'
-                    : '来源 GET /agents · 读取失败'}
+            <View style={styles.field}>
+              <Text allowFontScaling={false} style={styles.fieldLabel}>
+                ISMCTS simulations
               </Text>
-            </View>
-            {hasModel ? (
-              <ParamChips
-                x={g.ai.mccfrChips.x}
-                y={aiY + (g.ai.mccfrChips.y - g.ai.label.y)}
-                w={g.ai.mccfrChips.w}
-                h={g.ai.mccfrChips.h}
-                options={mccfrOptions}
-                value={config.mccfrModel}
-                onChange={(value) => patch({ mccfrModel: value })}
-                groupLabel="MCCFR 模型"
+              <SegmentedSelector
+                size="sm"
+                options={simOptions}
+                value={config.ismctsSimulations}
+                onChange={(simulations) => patch({ ismctsSimulations: simulations })}
               />
-            ) : (
-              <View
-                style={[
-                  styles.emptyBox,
-                  {
-                    left: g.ai.mccfrChips.x,
-                    top: aiY + (g.ai.mccfrChips.y - g.ai.label.y),
-                    width: g.ai.mccfrChips.w,
-                    height: g.ai.mccfrChips.h,
-                  },
-                ]}
-              >
-                <Text style={styles.emptyText} numberOfLines={1}>
-                  无可用模型（当前 {config.players} 人）
-                </Text>
-              </View>
-            )}
-            <Text
-              style={[
-                styles.note,
-                {
-                  left: g.ai.mccfrNote.x,
-                  top: aiY + (g.ai.mccfrNote.y - g.ai.label.y),
-                  width: g.ai.mccfrChips.w,
-                  fontSize: g.ai.mccfrNote.size,
-                  color: hasModel ? colors.muted : colors.goldLight,
-                },
-              ]}
-            >
-              {mccfrNote}
-            </Text>
-            {needManualModel ? (
-              <View
-                style={{
-                  position: 'absolute',
-                  left: g.ai.mccfrNote.x,
-                  top: aiY + (g.ai.mccfrNote.y - g.ai.label.y) + 26,
-                }}
-              >
-                <TextInput
-                  style={[styles.inlineInput, { width: 250 }]}
-                  value={config.mccfrModel}
-                  onChangeText={(value) => patch({ mccfrModel: value })}
-                  accessibilityLabel="手填 MCCFR 模型路径"
-                  placeholder="models/mccfr_3p_10k.pkl"
-                  placeholderTextColor={colors.muted}
+            </View>
+
+            <View style={styles.field}>
+              <Text allowFontScaling={false} style={styles.fieldLabel}>
+                MCCFR 模型
+              </Text>
+              {candidateLabels.length > 0 ? (
+                <SegmentedSelector
+                  size="sm"
+                  options={candidateLabels}
+                  value={selectedLabel}
+                  onChange={(label) => {
+                    const index = candidateLabels.indexOf(label);
+                    const option = candidates[index];
+                    if (option) patch({ mccfrModel: option.value });
+                  }}
                 />
-              </View>
-            ) : null}
-
-            <View style={[styles.fieldRow, { left: g.advanced.label.x, top: primaryY - 32, width: g.ai.mccfrChips.w }]}>
-              <Text style={[styles.fieldLabel, { fontSize: 11 }]}>Seed（留空随机）</Text>
-              <TextInput
-                style={[
-                  styles.inlineInput,
-                  { position: 'absolute', left: g.advanced.field.x - g.advanced.label.x, top: 0, width: g.advanced.field.w },
-                ]}
-                keyboardType="number-pad"
-                value={config.seed}
-                onChangeText={(value) => patch({ seed: value.replace(/[^0-9-]/g, '') })}
-                accessibilityLabel="随机种子"
-                placeholder="42"
-                placeholderTextColor={colors.muted}
-              />
+              ) : (
+                <Text allowFontScaling={false} style={styles.fieldHint}>
+                  {modelState === 'loading'
+                    ? '正在读取 GET /agents 的模型清单…'
+                    : `当前 ${config.players} 人没有可用模型（后端按人数训练）。`}
+                </Text>
+              )}
             </View>
-
-            <View style={{ position: 'absolute', left: g.primary.x, top: primaryY, width: g.primary.w }}>
-              <PrimaryButton
-                label={isSubmitting ? '正在创建对局…' : '开始对战'}
-                variant="jade"
-                glyph="炼"
-                loading={isSubmitting}
-                disabled={isSubmitting}
-                onPress={() => void start()}
-                testID="setup-start"
-                accessibilityHint={`POST /games：${config.players} 人，真人坐在 P${humanSeat}`}
-              />
-            </View>
-            <View style={{ position: 'absolute', left: g.secondary.x, top: secondaryY, width: g.secondary.w }}>
-              <PrimaryButton label="返回" variant="ghost" compact onPress={() => router.back()} testID="setup-back" />
-            </View>
-
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="查看 POST /games 请求体"
-              onPress={() => setShowRequest(true)}
-              style={({ pressed }) => [
-                styles.requestLink,
-                { left: g.utility.x, top: utilityY, width: g.utility.w },
-                pressed ? styles.pressed : null,
-              ]}
-            >
-              <Text style={styles.requestLinkText}>查看 POST /games 请求预览（契约自检）</Text>
-            </Pressable>
           </View>
-        </View>
+        </Panel>
 
-        <View style={styles.banners}>
-          <Banner message={error} onDismiss={clearError} />
-          {error && !mock ? (
-            <Pressable onPress={enableDemoMode} style={styles.demoAction}>
-              <Text style={styles.demoActionText}>后端连不上？点这里用内置演示数据把流程走通</Text>
-            </Pressable>
-          ) : null}
-          <Banner tone="notice" message={resetNotice} onDismiss={() => setResetNotice('')} />
-          {mock ? (
-            <Banner
-              tone="notice"
-              message={
-                isRuntimeMockOverride()
-                  ? 'MOCK 模式（运行期切换）：真人固定坐在 P0。'
-                  : 'MOCK 模式（EXPO_PUBLIC_USE_MOCK）：真人固定坐在 P0。'
-              }
-            />
-          ) : null}
-        </View>
-      </ScrollView>
+        <SetupNotice items={visibleNotices} onDismiss={(id) => setDismissed((prev) => [...prev, id])} />
+      </ScrollBody>
 
-      {showRequest ? (
-        <View style={styles.overlay}>
-          <View style={styles.sheet}>
-            <Text style={styles.sheetTitle}>POST /api/v1/games</Text>
-            <Text style={styles.sheetCode}>{requestPreview}</Text>
-            <Text style={styles.sheetNote}>
-              自检：players == agents.length；human_player 位置为 null；其余座位均有 agent。
-            </Text>
-            <PrimaryButton label="关闭" variant="ghost" compact onPress={() => setShowRequest(false)} />
-          </View>
+      <BottomBar>
+        {/* `PrimaryButton` 不接受 `accessibilityLabel`（冻结件），走向/参数写在外层 accessible 容器上 */}
+        <View
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel={`开始对战：POST /games ${config.players} 人，真人坐在 P${humanSeat}`}
+        >
+          <PrimaryButton fullWidth disabled={isSubmitting || modelMissing} onPress={() => void start()}>
+            开始对战
+          </PrimaryButton>
         </View>
-      ) : null}
-    </View>
+        <SecondaryButton fullWidth onPress={goHome}>
+          返回
+        </SecondaryButton>
+      </BottomBar>
+    </ScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    alignItems: 'center',
-    paddingBottom: 24,
-  },
-  measure: {
-    width: '100%',
-    height: 0,
-  },
-  headerAction: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  headerActionText: {
-    fontFamily: fontFamily.body,
-    fontSize: 11,
-    color: colors.goldLight,
-  },
-  hint: {
-    position: 'absolute',
-    fontFamily: fontFamily.body,
-    color: colors.muted,
-  },
+  // `space-y-3`（section 内部）/ `space-y-5`（section 之间由 ScrollBody 的 gap 提供）
+  section: { gap: sp(3) },
+  seatList: { gap: sp(2.5) },
+  panelBody: { gap: sp(4) },
+  field: { gap: sp(2) },
   fieldLabel: {
-    fontFamily: fontFamily.body,
-    fontWeight: '600',
-    color: colors.goldLight,
-    letterSpacing: 1,
-  },
-  fieldSource: {
-    fontFamily: fontFamily.body,
-    fontSize: 9,
-    color: colors.muted,
-    marginTop: 1,
-  },
-  fieldRow: {
-    position: 'absolute',
-  },
-  note: {
-    position: 'absolute',
-    fontFamily: fontFamily.body,
-    lineHeight: 13,
-  },
-  emptyBox: {
-    position: 'absolute',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.surfaceSunken,
-  },
-  emptyText: {
-    fontFamily: fontFamily.body,
-    fontSize: 12,
-    color: colors.muted,
-  },
-  inlineInput: {
-    minHeight: 26,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    color: colors.text,
+    ...sans(400),
     fontSize: 11,
-    backgroundColor: colors.surfaceSunken,
+    letterSpacing: track(0.14, 11),
+    color: creamFaint,
   },
-  requestLink: {
-    position: 'absolute',
-    alignItems: 'center',
-  },
-  requestLinkText: {
-    fontFamily: fontFamily.body,
-    fontSize: 10,
-    color: colors.jadeLight,
-    letterSpacing: 1,
-  },
-  banners: {
-    width: '100%',
-    maxWidth: 430,
-    paddingHorizontal: 16,
-    marginTop: 12,
-  },
-  demoAction: {
-    marginTop: 8,
-    alignItems: 'center',
-  },
-  demoActionText: {
-    fontFamily: fontFamily.body,
-    fontSize: 12,
-    color: colors.goldLight,
-  },
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    backgroundColor: 'rgba(3,13,14,0.86)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  sheet: {
-    width: '100%',
-    maxWidth: 400,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.surface,
-    padding: 16,
-    gap: 10,
-  },
-  sheetTitle: {
-    fontFamily: fontFamily.title,
-    fontSize: 16,
-    fontWeight: '700',
-    color: colors.goldLight,
-    letterSpacing: 2,
-  },
-  sheetCode: {
-    fontFamily: fontFamily.body,
+  fieldHint: {
+    ...sans(400),
     fontSize: 11,
-    lineHeight: 16,
-    color: colors.jadeLight,
-  },
-  sheetNote: {
-    fontFamily: fontFamily.body,
-    fontSize: 10,
-    color: colors.muted,
-  },
-  pressed: {
-    opacity: 0.8,
+    lineHeight: 17,
+    letterSpacing: track(0.14, 11),
+    color: creamFaint,
   },
 });
