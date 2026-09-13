@@ -11,6 +11,17 @@
 3. `observation()` 改为 API_CONTRACT §9 结构（含 instance_id / private_context token），
    并新增 `public_state()` / `legal_action_dicts()` / `reset()` / `action_from_dict()`。
 
+**与参考实现有意偏离的三条卡牌规则**（用户提供的前端原型文案为准，详见
+`docs/CARD_RULES_DELTA.md` 与 `docs/INTERFACES.md` 附录 A13）：
+
+* 观星术 `PLAY_PEEK` = 查看 + 改序（进入 `Phase.REORDER`，与逆天改命同一条私有 token 决策）；
+* 遁术 `PLAY_SKIP` = **反应牌**：只能在 `Phase.COUNTER` 打出，令该次法术完全无效并立即结束
+  本次结算（施术者回合结束）；行动阶段不再可用；
+* 反制符 `PLAY_COUNTER` = **反弹**：被反制时原施术者反被偷 1 张手牌（不再只是「取消」）。
+
+因此 `tests/test_game_reference_parity.py` 只对**未改动的牌型分支**保持逐步零差异，
+偏离点在该文件里以白名单显式列出（不再是「全量零差异」）。
+
 隐藏信息纪律（spec §59）：`GameState` 是上帝视角对象，只有环境本身可以完整访问；
 任何 AI 只允许读 `legal_actions()` / `phase` / 自己的 `hands[p]` / 自己的 `known_top[p]` /
 自己的 `reorder_view` / 公开量（手牌数、存活、弃牌、牌堆大小）。
@@ -128,6 +139,8 @@ class GameState:
         self.pending_target: Optional[int] = None
         self.reorder_owner: Optional[int] = None
         self.reorder_view: list[Card] = []
+        #: 本次 REORDER 决策由哪张牌触发（`Card.PEEK` / `Card.REORDER`），仅用于日志与语义区分。
+        self.reorder_card: Optional[Card] = None
         self.reinsert_player: Optional[int] = None
         self.logs: list[str] = []
 
@@ -193,6 +206,7 @@ class GameState:
         new.pending_target = self.pending_target
         new.reorder_owner = self.reorder_owner
         new.reorder_view = list(self.reorder_view)
+        new.reorder_card = self.reorder_card
         new.reinsert_player = self.reinsert_player
         new.logs = list(self.logs)
         return new
@@ -248,9 +262,13 @@ class GameState:
         p = self.decision_player()
 
         if self.phase == Phase.COUNTER:
+            # 反制窗口的三个选项（遁术是反应牌，见 docs/CARD_RULES_DELTA.md §2.2）：
+            # 不反制 / 反制符（反弹） / 遁术（避开并结束结算）。反制链深度固定为 1。
             actions = [Action(ActionKind.PASS_COUNTER)]
             if Card.COUNTER in self.hands[p]:
                 actions.append(Action(ActionKind.PLAY_COUNTER))
+            if Card.SKIP in self.hands[p]:
+                actions.append(Action(ActionKind.PLAY_SKIP))
             return actions
 
         if self.phase == Phase.REINSERT:
@@ -283,8 +301,7 @@ class GameState:
             actions.append(Action(ActionKind.PLAY_REORDER))
         if Card.SHUFFLE in hand and len(self.deck) > 1:
             actions.append(Action(ActionKind.PLAY_SHUFFLE))
-        if Card.SKIP in hand:
-            actions.append(Action(ActionKind.PLAY_SKIP))
+        # `Card.SKIP`（遁术）已改为反应牌，只在 `Phase.COUNTER` 可用，行动阶段不再出现。
         if Card.STEAL in hand:
             for target in range(self.num_players):
                 if target != p and self.alive[target] and self.hands[target]:
@@ -320,10 +337,17 @@ class GameState:
             return
 
         if action.kind == ActionKind.PLAY_PEEK:
+            # 观星术 = 查看 + 改序：与逆天改命共用 REORDER 决策（private_1..k token）。
             self._consume(p, Card.PEEK)
             self.actions_used += 1
-            self.known_top[p] = list(self.deck[:3])
-            self._log(f"P{p} 使用【观星术】，查看牌堆顶部 {len(self.known_top[p])} 张。")
+            self.reorder_owner = p
+            self.reorder_view = list(self.deck[: min(3, len(self.deck))])
+            self.known_top[p] = list(self.reorder_view)
+            self.reorder_card = Card.PEEK
+            self.phase = Phase.REORDER
+            self._log(
+                f"P{p} 使用【观星术】，查看牌堆顶部 {len(self.reorder_view)} 张，准备调整顺序。"
+            )
             return
 
         if action.kind == ActionKind.PLAY_REORDER:
@@ -332,6 +356,7 @@ class GameState:
             self.reorder_owner = p
             self.reorder_view = list(self.deck[: min(3, len(self.deck))])
             self.known_top[p] = list(self.reorder_view)
+            self.reorder_card = Card.REORDER
             self.phase = Phase.REORDER
             self._log(f"P{p} 使用【逆天改命】，准备调整顶部牌序。")
             return
@@ -345,11 +370,8 @@ class GameState:
             return
 
         if action.kind == ActionKind.PLAY_SKIP:
-            self._consume(p, Card.SKIP)
-            self.actions_used += 1
-            self._log(f"P{p} 使用【遁术】，本回合不抽牌。")
-            self._advance_turn_from(p)
-            return
+            # 遁术已改为 COUNTER 阶段的反应牌；行动阶段出现即非法（legal_actions 不再返回它）。
+            raise RuntimeError("【遁术】只能在反制窗口（Phase.COUNTER）作为反应牌使用。")
 
         if action.kind == ActionKind.PLAY_STEAL:
             self._consume(p, Card.STEAL)
@@ -366,8 +388,27 @@ class GameState:
         actor, target = self.pending_actor, self.pending_target
         assert actor is not None and target is not None
         if action.kind == ActionKind.PLAY_COUNTER:
+            # 反制 = 反弹：原施术者反被偷 1 张（见 docs/CARD_RULES_DELTA.md §2.3）。
             self._consume(target, Card.COUNTER)
-            self._log(f"P{target} 使用【反制符】，取消 P{actor} 的【摄物术】。")
+            if self.hands[actor]:
+                idx = self.rng.randrange(len(self.hands[actor]))
+                card = self.hands[actor].pop(idx)
+                self.hands[target].append(card)
+                self._log(
+                    f"P{target} 使用【反制符】，P{actor} 的【摄物术】被反弹，"
+                    f"P{target} 反偷走 P{actor} 1 张手牌。"
+                )
+            else:
+                self._log(
+                    f"P{target} 使用【反制符】，P{actor} 的【摄物术】被反弹，但 P{actor} 已无手牌可偷。"
+                )
+        elif action.kind == ActionKind.PLAY_SKIP:
+            # 遁术（反应牌）：法术完全无效，且立即结束本次结算（施术者回合结束）。
+            self._consume(target, Card.SKIP)
+            self._log(f"P{target} 使用【遁术】，避开了 P{actor} 的【摄物术】，本次结算立即结束。")
+            self.pending_actor = self.pending_target = None
+            self._advance_turn_from(actor)
+            return
         else:
             if self.hands[target]:
                 idx = self.rng.randrange(len(self.hands[target]))
@@ -389,9 +430,11 @@ class GameState:
         self.deck[:k] = [old[i] for i in order]
         self._clear_all_knowledge()
         self.known_top[owner] = list(self.deck[:k])
-        self._log(f"P{owner} 完成【逆天改命】，顶部 {k} 张牌的顺序已改变。")
+        source = "观星术" if self.reorder_card == Card.PEEK else "逆天改命"
+        self._log(f"P{owner} 完成【{source}】，顶部 {k} 张牌的顺序已改变。")
         self.reorder_owner = None
         self.reorder_view = []
+        self.reorder_card = None
         self.phase = Phase.ACTION
 
     def _step_reinsert(self, action: Action) -> None:
@@ -466,6 +509,7 @@ class GameState:
                 self.pending_actor = self.pending_target = None
                 self.reorder_owner = None
                 self.reorder_view = []
+                self.reorder_card = None
                 self.turn_no += 1
                 return
 
@@ -720,6 +764,9 @@ class GameState:
             return Action(ActionKind.END_TURN)
         if api_type == "COUNTER":
             return Action(ActionKind.PLAY_COUNTER)
+        if api_type == "ESCAPE":
+            # 反应牌「遁术」：只在 COUNTER 阶段出现（见 docs/CARD_RULES_DELTA.md §2.2）。
+            return Action(ActionKind.PLAY_SKIP)
         if api_type == "PASS_COUNTER":
             return Action(ActionKind.PASS_COUNTER)
         if api_type == "PLAY_CARD":

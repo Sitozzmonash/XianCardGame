@@ -112,6 +112,22 @@ def test_rule_agent_never_touches_hidden_info(seed, num_players):
     assert result["steps"] > 5
 
 
+def test_rule_agent_dodge_decision_reads_no_hidden_info():
+    """遁术是反应牌：RuleAgent 在 COUNTER 阶段选「遁术」时也不得读隐藏信息。"""
+    state = _fresh(num_players=3, seed=33)
+    p = state.current_player
+    target = (p + 1) % 3
+    state.hands[p] = [Card.STEAL]
+    state.hands[target] = [Card.SKIP, Card.PEEK]
+    state.step(Action(ActionKind.PLAY_STEAL, target=target))
+    assert state.phase == Phase.COUNTER
+
+    probe = HiddenInfoProbe(state, target)
+    action = RuleAgent(0).act(probe, target)
+    assert action == Action(ActionKind.PLAY_SKIP)
+    assert probe.violations == [], probe.violations
+
+
 @pytest.mark.parametrize("seed", [1, 2])
 def test_ismcts_never_touches_hidden_info_and_only_determinizes(seed):
     result = run_probed_game(

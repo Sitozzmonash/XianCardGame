@@ -21,7 +21,8 @@ EXPECTED_TYPES = {
     ActionKind.PLAY_PEEK: "PLAY_CARD",
     ActionKind.PLAY_REORDER: "PLAY_CARD",
     ActionKind.PLAY_SHUFFLE: "PLAY_CARD",
-    ActionKind.PLAY_SKIP: "PLAY_CARD",
+    # 遁术改为反制阶段的反应牌 → 独立的 api type（docs/CARD_RULES_DELTA.md §2.2）
+    ActionKind.PLAY_SKIP: "ESCAPE",
     ActionKind.PLAY_STEAL: "PLAY_CARD_TARGET",
     ActionKind.PASS_COUNTER: "PASS_COUNTER",
     ActionKind.PLAY_COUNTER: "COUNTER",
@@ -90,6 +91,7 @@ def test_action_id_is_blake2b_8_hex_and_stable():
 
 def test_card_kind_tables_are_inverse():
     assert KIND_TO_CARD[ActionKind.PLAY_PEEK] is Card.PEEK
+    assert KIND_TO_CARD[ActionKind.PLAY_SKIP] is Card.SKIP
     assert KIND_TO_CARD[ActionKind.PLAY_STEAL] is Card.STEAL
     assert CARD_TO_KIND[Card.SHUFFLE] is ActionKind.PLAY_SHUFFLE
     for kind, card in KIND_TO_CARD.items():
@@ -109,6 +111,7 @@ def test_labels():
     assert ACTION_LABELS[ActionKind.PLAY_PEEK] == "使用观星术"
     assert ACTION_LABELS[ActionKind.PLAY_COUNTER] == "使用反制符"
     assert ACTION_LABELS[ActionKind.PASS_COUNTER] == "不反制"
+    assert ACTION_LABELS[ActionKind.PLAY_SKIP] == "使用遁术（避开并结束结算）"
     assert Action(ActionKind.PLAY_STEAL, target=2).label() == "使用摄物术 → P2"
     assert Action(ActionKind.REINSERT, param="TOP").label() == "回插：牌堆顶"
     assert Action(ActionKind.REINSERT, param="BOTTOM").label() == "回插：牌堆底部"

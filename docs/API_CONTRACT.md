@@ -399,7 +399,9 @@ POST：
 }
 ```
 
-## 12.3 反制
+## 12.3 反制窗口（反制符→反弹 / 遁术→避开）
+
+被摄物术指向的玩家（`phase == "COUNTER"`）会拿到**最多三个**反应选项：
 
 ```json
 [
@@ -412,13 +414,33 @@ POST：
     "id": "a_counter_no",
     "type": "PASS_COUNTER",
     "label": "不反制"
+  },
+  {
+    "id": "a_escape",
+    "type": "ESCAPE",
+    "label": "使用遁术（避开并结束结算）",
+    "card_instance_id": "h_003"
   }
 ]
 ```
 
-## 12.4 逆天改命排序
+- `COUNTER` 仅当手里有反制符时出现。**反制 = 反弹**（文案以参考原型为准）：效果转向施术者 ——
+  **原目标反偷原施术者 1 张手牌**（原目标不丢牌；施术者手里没牌时什么都不发生）。
+  反制链深度固定为 1，不能反制反制。
+- `ESCAPE` 仅当手里有遁术时出现（遁术是**反应牌**，行动阶段不能主动打出）。
+  打出后该法术**完全无效**（目标不丢牌、施术者不得到牌），并**立即结束本次结算**：
+  施术者的回合就此结束（按正常轮转推进到下一名存活玩家；施术者不抽牌）。
+- `PASS_COUNTER`：法术正常生效，从目标手里随机偷 1 张。
 
-服务端先返回 private decision context：
+payload 一律 `{}`（`action_id` 已足够区分三个选项）。
+
+> 规则来源：用户提供的前端参考原型 + 裁决 `docs/INTERFACES.md` 附录 A13、
+> 实现清单 `docs/CARD_RULES_DELTA.md`。
+
+## 12.4 顶部排序（逆天改命 / 观星术）
+
+`逆天改命` 与 `观星术` 都会进入同一个 `phase == "REORDER_TOP"` 决策：服务端先返回
+private decision context（`观星术` 是「查看 + 改序」，查看与排序是同一次决策）：
 
 ```json
 {
@@ -499,7 +521,7 @@ POST：
 
 Events 用来驱动前端动画和战斗日志。
 
-建议类型：
+事件类型全集（19 个；`TURN_SKIPPED` 为历史保留，主动遁术移除后不再产生）：
 
 ```text
 GAME_STARTED
@@ -513,7 +535,8 @@ COUNTER_PASSED
 DECK_PEEKED
 DECK_REORDERED
 DECK_SHUFFLED
-TURN_SKIPPED
+TURN_SKIPPED        # 保留：主动遁术已移除，新对局不再产生
+ESCAPE_DODGED       # 新增：遁术避开了指向你的法术
 TRIBULATION_DRAWN
 TRIBULATION_DEFUSED
 TRIBULATION_REINSERTED
@@ -521,6 +544,16 @@ PLAYER_ELIMINATED
 TURN_ENDED
 GAME_ENDED
 ```
+
+卡片规则改动后的三条事件语义（`docs/CARD_RULES_DELTA.md`）：
+
+| 场景 | 事件序列 |
+|---|---|
+| 观星术（查看 + 改序） | `CARD_PLAYED`(STARGAZING) → `DECK_PEEKED`（牌面仅自己可见）→（提交排序后）`DECK_REORDERED` |
+| 反制符（反弹） | `CARD_PLAYED`(COUNTER) → `COUNTER_USED`(`data.redirected=true`, `data.stolen=bool`) →〔偷到牌时〕`CARD_STOLEN`(`actor`=反弹方，`data.target`=被反偷的施术者，`data.redirected=true`) |
+| 遁术（避开法术） | `CARD_PLAYED`(ESCAPE) → `ESCAPE_DODGED`(`actor`=使用遁术者，`data.target`=法术施术者，`data.card_id`=被避开的法术) → `TURN_ENDED`(`actor`=施术者) → `TURN_STARTED` |
+
+不反制（`PASS_COUNTER`）产生的 `CARD_STOLEN` 形状**不变**（`data == {"target": 被偷者}`，无 `redirected` 键）。
 
 公共事件绝不能携带不应公开的信息。
 
@@ -564,6 +597,50 @@ GAME_ENDED
 → 播放化解
 → 再进入回插选择
 ```
+
+反制反弹（`redirected` 标记事件方向）：
+
+```json
+{
+  "seq": 12,
+  "type": "COUNTER_USED",
+  "actor": 1,
+  "data": {
+    "redirected": true,
+    "stolen": true
+  }
+}
+```
+
+```json
+{
+  "seq": 13,
+  "type": "CARD_STOLEN",
+  "actor": 1,
+  "data": {
+    "target": 0,
+    "redirected": true
+  }
+}
+```
+
+遁术避开法术（法术完全无效，施术者回合立即结束）：
+
+```json
+{
+  "seq": 21,
+  "type": "ESCAPE_DODGED",
+  "actor": 1,
+  "data": {
+    "target": 0,
+    "card_id": "STEAL",
+    "name": "摄物术"
+  }
+}
+```
+
+前端：`actor` 是使用遁术的人，`data.target` 是被避开的法术施术者
+（渲染成「P1 使用遁术，避开了 P0 的摄物术」）。
 
 ---
 
@@ -631,7 +708,7 @@ GET /cards
       "id": "STARGAZING",
       "name": "观星术",
       "category": "ACTIVE",
-      "description": "查看牌堆顶部最多3张牌。",
+      "description": "查看牌堆顶部最多 3 张牌，并重新调整顺序。",
       "asset": "stargazing"
     }
   ]
@@ -639,6 +716,20 @@ GET /cards
 ```
 
 规则效果仍由 Python 控制。
+
+八张牌的 `description` / `category` 全量（**文案以用户提供的前端参考原型为准**，
+规则实现见 `docs/CARD_RULES_DELTA.md`）：
+
+| id | name | category | description |
+|---|---|---|---|
+| `TRIBULATION` | 天劫 | `TRIBULATION` | 抽到后必须渡劫；手中没有护劫符则立即淘汰。天劫不进入手牌。 |
+| `DEFUSE` | 护劫符 | `DEFUSE` | 自动化解一次天劫，并把天劫秘密回插到牌堆的指定区域。 |
+| `STARGAZING` | 观星术 | `ACTIVE` | 查看牌堆顶部最多 3 张牌，并重新调整顺序。 |
+| `REWRITE_FATE` | 逆天改命 | `ACTIVE` | 查看牌堆顶部最多 3 张牌，并重新调整它们的顺序，只有自己知道最终排序。 |
+| `SHUFFLE` | 扰乱天机 | `ACTIVE` | 重新洗牌，所有玩家此前获得的牌顶知识全部失效。 |
+| `ESCAPE` | 遁术 | `REACTIVE` | 避开一次指向你的法术，并立即结束当前结算。 |
+| `STEAL` | 摄物术 | `ACTIVE` | 指定另一名存活玩家，随机偷取对方 1 张手牌；目标可以使用反制符反弹或遁术避开。 |
+| `COUNTER` | 反制符 | `REACTIVE` | 反制一次指向你的法术，令其效果转向施术者。 |
 
 ---
 

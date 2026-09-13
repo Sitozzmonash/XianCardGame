@@ -23,7 +23,7 @@ EXPECTED = {
     Card.PEEK: ("STARGAZING", "观星术", "ACTIVE", "stargazing"),
     Card.REORDER: ("REWRITE_FATE", "逆天改命", "ACTIVE", "rewrite_fate"),
     Card.SHUFFLE: ("SHUFFLE", "扰乱天机", "ACTIVE", "shuffle"),
-    Card.SKIP: ("ESCAPE", "遁术", "ACTIVE", "escape"),
+    Card.SKIP: ("ESCAPE", "遁术", "REACTIVE", "escape"),
     Card.STEAL: ("STEAL", "摄物术", "ACTIVE", "steal"),
     Card.COUNTER: ("COUNTER", "反制符", "REACTIVE", "counter"),
 }
@@ -87,6 +87,18 @@ def test_card_specs_order_and_fields():
     for spec in CARD_SPECS:
         assert spec.asset == spec.asset.lower()
         assert " " not in spec.asset and "-" not in spec.asset
+
+
+def test_card_descriptions_follow_the_prototype_text():
+    """三张改动牌的文案以用户提供的前端原型为准（docs/CARD_RULES_DELTA.md §1）。"""
+    assert card_spec(Card.PEEK).description == "查看牌堆顶部最多 3 张牌，并重新调整顺序。"
+    assert card_spec(Card.SKIP).description == "避开一次指向你的法术，并立即结束当前结算。"
+    assert card_spec(Card.COUNTER).description == "反制一次指向你的法术，令其效果转向施术者。"
+    # 摄物术的说明必须与新规则一致（反制是反弹，不是取消）
+    assert "反弹" in card_spec(Card.STEAL).description
+    assert "取消" not in card_spec(Card.STEAL).description
+    # 遁术现在是反应牌
+    assert card_spec(Card.SKIP).category == "REACTIVE"
 
 
 def test_counts_vector_and_alive_mask():

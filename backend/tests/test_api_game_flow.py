@@ -1,10 +1,10 @@
-"""完整一局 API 测试 + 4 种特殊决策覆盖 + 事件流（API_CONTRACT §11 §12 §13 §14）。
+"""完整一局 API 测试 + 特殊决策覆盖 + 事件流（API_CONTRACT §11 §12 §13 §14）。
 
 策略：
 1. 「真打」——用与 `scripts/e2e_api.py` 相同的机器人跑完整局，断言终局 / revision /
    事件 / 特殊决策覆盖；
-2. 「定向注入」——直接构造特殊 Phase 的 state，走真实 HTTP 路径把 4 种特殊决策
-   （反制 / 摄物术选目标 / 逆天改命排序 / 天劫回插）逐个打一遍，不依赖抽牌运气。
+2. 「定向注入」——直接构造特殊 Phase 的 state，走真实 HTTP 路径把 5 类特殊决策
+   （反制反弹 / 遁术避开 / 摄物术选目标 / 顶部排序 / 天劫回插）逐个打一遍，不依赖抽牌运气。
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def test_full_game_multiple_seeds(client, players):
 
 
 def test_special_decisions_covered_across_games(client):
-    """4 种特殊决策都要被真实走通（跨多局汇总）。"""
+    """各类特殊决策都要被真实走通（跨多局汇总）。"""
     hits: set = set()
     for seed in (20260912, 20260912 + 977, 20260912 + 1954):
         result = play_game(client, players=3, seed=seed, max_steps=250)
@@ -171,13 +171,22 @@ def test_action_after_game_end_409(client):
     assert resp.json()["error"]["code"] == "GAME_ENDED"
 
 
-# ------------------------------------------------------- 定向注入：4 种特殊决策
+# ------------------------------------------------------- 定向注入：5 类特殊决策
 
 
 def _force(client, players=3, seed=20260912):
     """建一局并把 session 拿出来（测试内部用：注入特殊 Phase）。"""
     created = create_game(client, players=players, seed=seed).json()
     return created["game_id"], store().get(created["game_id"])
+
+
+def _freeze_ai(session):
+    """停掉 AI 自动行动，让响应的事件只包含人类刚提交的那一步。
+
+    否则服务端会继续把 AI 的回合跑完（可能又偷牌 / 洗牌），响应的 events 与
+    终态手牌就无法定位到「这一步」的效果上。
+    """
+    session.agents = {}
 
 
 def _post(client, game_id, session, action_id, payload):
@@ -283,15 +292,17 @@ def test_reinsert_tribulation_decision_over_http(client):
 
 
 def test_counter_and_pass_counter_decisions_over_http(client):
-    # --- 反制：人类手里有反制符，Phase.COUNTER 等他决定
+    # --- 反制 = 反弹：人类手里有反制符，Phase.COUNTER 等他决定
     game_id, session = _force(client)
     state = session.state
-    state.hands[0].append(Card.COUNTER)
+    state.hands[0] = [Card.COUNTER]  # 只留反制符 → 反制窗口选项确定
+    state.hands[1] = [Card.PEEK, Card.PEEK]  # 施术者手里有牌可被反偷
     state.phase = Phase.COUNTER
     state.pending_actor = 1
     state.pending_target = 0
     state.current_player = 1
     session._rebuild_actions()
+    _freeze_ai(session)
 
     view = client.get(f"{BASE}/games/{game_id}").json()
     assert view["phase"] == "COUNTER"
@@ -303,31 +314,91 @@ def test_counter_and_pass_counter_decisions_over_http(client):
     resp = _post(client, game_id, session, _entry(view, "COUNTER")["id"], {})
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert any(ev["type"] == "COUNTER_USED" for ev in body["events"])
-    assert not any(ev["type"] == "CARD_STOLEN" for ev in body["events"])
+    used = [ev for ev in body["events"] if ev["type"] == "COUNTER_USED"]
+    assert used, "反制必须产生 COUNTER_USED"
+    assert used[0]["actor"] == 0
+    assert used[0]["data"]["redirected"] is True  # 规则改动：取消 → 反弹
+    # 反弹方向：原目标（0）反偷原施术者（1）一张；被偷的牌面仍是私有信息
+    stolen = [ev for ev in body["events"] if ev["type"] == "CARD_STOLEN"]
+    assert stolen, "反弹必须产生方向反转的 CARD_STOLEN"
+    assert stolen[0]["actor"] == 0 and stolen[0]["data"]["target"] == 1
+    assert stolen[0]["data"]["redirected"] is True
+    assert "card_id" not in stolen[0]["data"]
+    # 事件顺序：反弹发生在 COUNTER_USED 之后
+    types = [ev["type"] for ev in body["events"]]
+    assert types.index("COUNTER_USED") < types.index("CARD_STOLEN")
     assert body["phase"] in {"ACTION", "ENDED"}
+    # 手牌确实反向转移（AI 已冻结，不会被后续行动干扰）
+    assert session.state.hands[0] == [Card.PEEK]  # 反制符已消耗 + 反偷来的 1 张
+    assert len(session.state.hands[1]) == 1
+    assert Card.COUNTER in session.state.discard
 
     # --- 不反制：人类手里没有反制符 → 只能 PASS，且被偷的牌面不得公开
     game_id2, session2 = _force(client)
     state2 = session2.state
-    while Card.COUNTER in state2.hands[0]:
-        state2.hands[0].remove(Card.COUNTER)
-    state2.hands[1].append(Card.DEFUSE)  # 保证被偷方有牌
+    state2.hands[0] = [Card.PEEK, Card.SHUFFLE]
+    state2.hands[1] = [Card.DEFUSE]  # 保证被偷方有牌
     state2.phase = Phase.COUNTER
     state2.pending_actor = 1
     state2.pending_target = 0
     state2.current_player = 1
     session2._rebuild_actions()
+    _freeze_ai(session2)
 
     view2 = client.get(f"{BASE}/games/{game_id2}").json()
     assert {a["type"] for a in view2["legal_actions"]} == {"PASS_COUNTER"}
     resp2 = _post(client, game_id2, session2, _entry(view2, "PASS_COUNTER")["id"], {})
     assert resp2.status_code == 200, resp2.text
     body2 = resp2.json()
-    stolen = [ev for ev in body2["events"] if ev["type"] == "CARD_STOLEN"]
-    assert stolen, "不反制必须产生 CARD_STOLEN"
-    assert stolen[0]["actor"] == 1 and stolen[0]["data"]["target"] == 0
-    assert "card_id" not in stolen[0]["data"], "被偷的牌面属于私有信息"
+    stolen2 = [ev for ev in body2["events"] if ev["type"] == "CARD_STOLEN"]
+    assert stolen2, "不反制必须产生 CARD_STOLEN"
+    assert stolen2[0]["actor"] == 1 and stolen2[0]["data"]["target"] == 0
+    assert stolen2[0]["data"] == {"target": 0}, "不反制的 CARD_STOLEN 形状不得变（无 redirected 键）"
+    assert "card_id" not in stolen2[0]["data"], "被偷的牌面属于私有信息"
+
+
+def test_escape_dodge_decision_over_http(client):
+    """遁术是反应牌：被摄物术指向时可在 COUNTER 阶段打出，避开法术并立即结束结算。"""
+    game_id, session = _force(client)
+    state = session.state
+    state.hands[0] = [Card.SKIP, Card.PEEK]
+    state.hands[1] = [Card.PEEK]
+    state.phase = Phase.COUNTER
+    state.pending_actor = 1
+    state.pending_target = 0
+    state.current_player = 1
+    session._rebuild_actions()
+    _freeze_ai(session)
+
+    view = client.get(f"{BASE}/games/{game_id}").json()
+    assert view["phase"] == "COUNTER"
+    assert {a["type"] for a in view["legal_actions"]} == {"ESCAPE", "PASS_COUNTER"}
+    escape = _entry(view, "ESCAPE")
+    assert escape["label"] == "使用遁术（避开并结束结算）"
+    assert escape["card_instance_id"] == "h_0_0"  # 指向手牌里的遁术
+    assert _entry(view, "COUNTER") is None  # 手里没有反制符
+
+    resp = _post(client, game_id, session, escape["id"], {})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    types = [ev["type"] for ev in body["events"]]
+    assert "CARD_PLAYED" in types and "ESCAPE_DODGED" in types
+    played = [ev for ev in body["events"] if ev["type"] == "CARD_PLAYED"][0]
+    assert played["actor"] == 0 and played["data"]["card_id"] == "ESCAPE"
+    dodged = [ev for ev in body["events"] if ev["type"] == "ESCAPE_DODGED"][0]
+    assert dodged["actor"] == 0  # 使用遁术的人
+    assert dodged["data"] == {"target": 1, "card_id": "STEAL", "name": "摄物术"}
+    assert "CARD_STOLEN" not in types, "被避开的法术完全无效"
+    assert types.index("ESCAPE_DODGED") < types.index("TURN_ENDED")
+    assert "TURN_STARTED" in types  # 施术者回合结束 → 下一家开始新回合
+    # 法术完全无效：目标不丢牌，施术者不得到牌（遁术本身已消耗）
+    assert session.state.hands[0] == [Card.PEEK]
+    assert session.state.hands[1] == [Card.PEEK]
+    assert Card.SKIP in session.state.discard  # 遁术进弃牌堆
+    assert session.state.phase == Phase.ACTION
+    assert session.state.current_player != 1  # 施术者的回合被立即结束
+    assert session.state.turn_no == 2
+    assert body["phase"] == "ACTION"
 
 
 def test_play_card_target_decision_over_http(client):
@@ -404,3 +475,23 @@ def test_play_card_peek_private_events(client):
         assert [item["card_id"] for item in known] == [
             item["card_id"] for item in peeked[0]["data"]["cards"]
         ]
+
+    # 规则改动（观星术 = 查看 + 改序）：打完后必须进入排序阶段，并能提交排列
+    assert body["phase"] == "REORDER_TOP"
+    assert body["decision_player"] == 0
+    order = _entry(body, "REORDER_TOP")
+    cards = body["observation"]["private_context"]["cards"]
+    assert [c["token"] for c in cards] == ["private_1", "private_2", "private_3"]
+    assert order["params"]["order"]["options"] == ["private_1", "private_2", "private_3"]
+    before_names = [c["name"] for c in cards]
+
+    resp2 = _post(
+        client, game_id, session, order["id"], {"order": list(reversed([c["token"] for c in cards]))}
+    )
+    assert resp2.status_code == 200, resp2.text
+    body2 = resp2.json()
+    assert any(ev["type"] == "DECK_REORDERED" for ev in body2["events"])
+    # 排列真的生效（顺序被反转），且回到了正常阶段
+    assert [card.value for card in session.state.deck[:3]] == list(reversed(before_names))
+    assert body2["phase"] == "ACTION"
+    assert body2["decision_player"] == 0

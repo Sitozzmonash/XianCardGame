@@ -1,10 +1,10 @@
 """规则 AI（人工 baseline，spec §19）。
 
-策略（与参考实现逐条一致）：
-- 被摄物术针对：有反制符则优先反制；
+策略（与参考实现逐条一致，卡牌规则改动处见 `docs/CARD_RULES_DELTA.md`）：
+- 被摄物术针对：有反制符则反制（反弹）；没有反制符但有遁术则用遁术避开，否则不反制；
 - 化解天劫后：攻击型策略，天劫尽量回插牌堆顶；
-- 改命排序：顶部有天劫则把它尽量往后放；
-- 已知下一张是天劫：优先遁术 > 洗牌 > 逆天改命 > 结束回合；
+- 改命排序：顶部有天劫则把它尽量往后放（观星术 / 逆天改命共用这条）；
+- 已知下一张是天劫：优先洗牌 > 逆天改命 > 观星术（三者都能改掉牌顶）> 结束回合；
 - 不知道牌顶且本回合还没用行动：优先观星术；
 - 手牌 ≤ 5 时偷牌，目标选手牌最多的人。
 
@@ -39,8 +39,12 @@ class RuleAgent(BaseAgent):
             return legal[0]
 
         if state.phase == Phase.COUNTER:
-            counter = self._find(legal, ActionKind.PLAY_COUNTER)
-            return counter or legal[0]
+            # 反应牌优先级：反制符（反弹，把损失转给施术者）> 遁术（避开并结束结算）> 不反制。
+            for kind in (ActionKind.PLAY_COUNTER, ActionKind.PLAY_SKIP):
+                action = self._find(legal, kind)
+                if action:
+                    return action
+            return legal[0]
 
         if state.phase == Phase.REINSERT:
             # 攻击型策略：尽量把天劫放回顶部，让下一家承压。
@@ -61,10 +65,11 @@ class RuleAgent(BaseAgent):
 
         known = state.known_top[player]
         if known and known[0] == Card.TRIBULATION:
+            # 遁术已改为反应牌（不再能主动跳过抽牌），改用能改掉牌顶的三张牌。
             for kind in (
-                ActionKind.PLAY_SKIP,
                 ActionKind.PLAY_SHUFFLE,
                 ActionKind.PLAY_REORDER,
+                ActionKind.PLAY_PEEK,
             ):
                 a = self._find(legal, kind)
                 if a:

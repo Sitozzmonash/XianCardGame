@@ -130,6 +130,12 @@ def test_cards_schema(client):
     assert by_id["REWRITE_FATE"]["name"] == "逆天改命"
     assert by_id["COUNTER"]["category"] == "REACTIVE"
     assert by_id["TRIBULATION"]["category"] == "TRIBULATION"
+    # 规则按原型文案调整（docs/CARD_RULES_DELTA.md）：遁术从主动牌变成反应牌
+    assert by_id["ESCAPE"]["category"] == "REACTIVE"
+    assert by_id["ESCAPE"]["name"] == "遁术"
+    assert by_id["STARGAZING"]["description"] == "查看牌堆顶部最多 3 张牌，并重新调整顺序。"
+    assert by_id["ESCAPE"]["description"] == "避开一次指向你的法术，并立即结束当前结算。"
+    assert by_id["COUNTER"]["description"] == "反制一次指向你的法术，令其效果转向施术者。"
 
 
 def test_cards_never_leak_runtime_state(client):
@@ -596,3 +602,15 @@ def test_agents_default_seats(client):
     }
     assert agents[0] is None
     assert agents[1]["type"] == "rule"
+
+
+def test_event_kind_set_matches_contract_list():
+    """§13 事件类型全集必须三方一致：`EventKind` / 测试白名单 / 文档（含新增的 ESCAPE_DODGED）。"""
+    from app.schemas.event import EVENT_TYPES, EventKind
+
+    from test_api_support import EVENT_TYPES as CONTRACT_EVENT_TYPES
+
+    assert set(EVENT_TYPES) == {kind.value for kind in EventKind}
+    assert set(EVENT_TYPES) == CONTRACT_EVENT_TYPES
+    assert "ESCAPE_DODGED" in EVENT_TYPES  # 遁术避开法术（规则改动新增）
+    assert "TURN_SKIPPED" in EVENT_TYPES  # 历史保留（主动遁术已移除，不再产生）

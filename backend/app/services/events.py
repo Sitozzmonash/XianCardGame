@@ -10,6 +10,18 @@
 * `CARD_STOLEN` 不回传被偷的牌（偷牌方自己看手牌就知道，其他人不该知道）；
 * `DECK_REORDERED` 不回传排序结果，`TRIBULATION_REINSERTED` 只回传区域桶名；
 * 每个事件只允许 `seq / type / actor / data` 四个键。
+
+卡牌规则改动后的三条事件语义（`docs/CARD_RULES_DELTA.md`）：
+
+* 观星术 = 查看 + 改序：先 `CARD_PLAYED`(STARGAZING) + `DECK_PEEKED`（私有牌面），
+  玩家提交排列后再 `DECK_REORDERED`（与逆天改命同形）；
+* 遁术（反应牌）= `CARD_PLAYED`(ESCAPE) + `ESCAPE_DODGED`
+  （`actor` = 使用遁术者，`data.target` = 被避开的法术施术者，`data.card_id` = 被避开的法术）
+  + `TURN_ENDED`（`actor` = 施术者，其回合被立即结束）+ 随后的 `TURN_STARTED`；
+* 反制符 = 反弹：`CARD_PLAYED`(COUNTER) + `COUNTER_USED`(`data.redirected=true`,
+  `data.stolen=bool`) + 若真的偷到牌则 `CARD_STOLEN`（`actor` = 反弹方，
+  `data.target` = 被反偷的原施术者，`data.redirected=true`）；不反制（`PASS_COUNTER`）产生的
+  `CARD_STOLEN` 形状不变（无 `redirected` 键）。
 """
 
 from __future__ import annotations
@@ -131,8 +143,26 @@ def synthesize_events(
         events.append(_event(EventKind.DECK_SHUFFLED.value, actor, {}))
 
     elif kind == ActionKind.PLAY_SKIP:
-        events.append(_event(EventKind.TURN_SKIPPED.value, actor, {}))
-        events.append(_event(EventKind.TURN_ENDED.value, actor, {}))
+        # 遁术（反应牌）：法术完全无效，且立即结束本次结算（施术者回合结束）。
+        caster = before.pending_actor
+        events.append(
+            _event(
+                EventKind.ESCAPE_DODGED.value,
+                actor,
+                {
+                    "target": int(caster) if caster is not None else None,
+                    "card_id": API_CARD_ID[Card.STEAL],
+                    "name": Card.STEAL.value,
+                },
+            )
+        )
+        events.append(
+            _event(
+                EventKind.TURN_ENDED.value,
+                int(caster) if caster is not None else actor,
+                {},
+            )
+        )
 
     elif kind == ActionKind.PLAY_STEAL:
         events.append(
@@ -140,7 +170,29 @@ def synthesize_events(
         )
 
     elif kind == ActionKind.PLAY_COUNTER:
-        events.append(_event(EventKind.COUNTER_USED.value, actor, {}))
+        # 反制 = 反弹：反制符使用者的手牌必须增加 1 张（原施术者反被偷）。
+        caster = before.pending_actor
+        stolen = (
+            caster is not None
+            and caster != actor
+            and before.hand_sizes[caster] > len(state.hands[caster])
+        )
+        events.append(
+            _event(
+                EventKind.COUNTER_USED.value,
+                actor,
+                {"redirected": True, "stolen": bool(stolen)},
+            )
+        )
+        if stolen:
+            # `actor` 是反弹方（原目标），`data.target` 是被反偷的施术者。
+            events.append(
+                _event(
+                    EventKind.CARD_STOLEN.value,
+                    actor,
+                    {"target": int(caster), "redirected": True},
+                )
+            )
 
     elif kind == ActionKind.PASS_COUNTER:
         events.append(_event(EventKind.COUNTER_PASSED.value, actor, {}))

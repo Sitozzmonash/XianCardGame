@@ -29,12 +29,16 @@ class ActionKind(str, Enum):
 
 
 #: ActionKind -> API_CONTRACT 动作 type（§1.7 映射表，冻结）
+#:
+#: 注意 `PLAY_SKIP`：成员名与中文 value 保持与参考实现一致（enum 表面不变），
+#: 但**语义已改**为反制阶段的反应牌「遁术：避开一次指向你的法术」，因此 api type
+#: 从 `PLAY_CARD` 改为独立的 `ESCAPE`（见 docs/CARD_RULES_DELTA.md §2.2）。
 API_ACTION_TYPE: dict[ActionKind, str] = {
     ActionKind.END_TURN: "END_ACTION",
     ActionKind.PLAY_PEEK: "PLAY_CARD",
     ActionKind.PLAY_REORDER: "PLAY_CARD",
     ActionKind.PLAY_SHUFFLE: "PLAY_CARD",
-    ActionKind.PLAY_SKIP: "PLAY_CARD",
+    ActionKind.PLAY_SKIP: "ESCAPE",
     ActionKind.PLAY_STEAL: "PLAY_CARD_TARGET",
     ActionKind.PASS_COUNTER: "PASS_COUNTER",
     ActionKind.PLAY_COUNTER: "COUNTER",
@@ -71,7 +75,7 @@ ACTION_LABELS: dict[ActionKind, str] = {
     ActionKind.PLAY_PEEK: "使用观星术",
     ActionKind.PLAY_REORDER: "使用逆天改命",
     ActionKind.PLAY_SHUFFLE: "使用扰乱天机",
-    ActionKind.PLAY_SKIP: "使用遁术",
+    ActionKind.PLAY_SKIP: "使用遁术（避开并结束结算）",
     ActionKind.PLAY_COUNTER: "使用反制符",
     ActionKind.PASS_COUNTER: "不反制",
     ActionKind.REORDER_TOP: "调整顶部牌序",

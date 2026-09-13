@@ -268,6 +268,40 @@ def test_stolen_card_face_is_private(client):
     assert_view_is_clean(session, seat, body)
 
 
+def test_redirected_counter_keeps_stolen_card_face_private(client):
+    """反制 = 反弹（规则改动）：被反偷的牌面仍是私有信息，事件里不得出现。"""
+    created = create_game(client, players=3, seed=20260912).json()
+    game_id, seat = created["game_id"], created["player_id"]
+    session = store().get(game_id)
+    state = session.state
+
+    state.hands[0] = [Card.COUNTER]  # 反制符；反制窗口选项确定
+    state.hands[1] = [Card.PEEK, Card.SHUFFLE]  # 施术者手里的牌（会被反偷一张）
+    state.phase = Phase.COUNTER
+    state.pending_actor = 1
+    state.pending_target = 0
+    state.current_player = 1
+    session.agents = {}  # 冻结 AI：响应事件只含这一步
+    session._rebuild_actions()
+
+    view = client.get(f"{BASE}/games/{game_id}").json()
+    entry = next(a for a in view["legal_actions"] if a["type"] == "COUNTER")
+    resp = client.post(
+        f"{BASE}/games/{game_id}/actions",
+        json={"revision": view["revision"], "action_id": entry["id"], "payload": {}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    stolen = [ev for ev in body["events"] if ev["type"] == "CARD_STOLEN"]
+    assert stolen and stolen[0]["data"]["redirected"] is True
+    assert stolen[0]["actor"] == 0 and stolen[0]["data"]["target"] == 1
+    assert "card_id" not in stolen[0]["data"], "被反偷的牌面属于私有信息"
+    # 施术者剩余手牌（1 张）不得作为整体片段出现在响应里
+    remaining = compact([API_CARD_ID[card] for card in state.hands[1]])
+    assert remaining not in compact(body)
+    assert_view_is_clean(session, seat, body)
+
+
 def test_error_responses_carry_no_state(client):
     created = create_game(client, players=3, seed=20260912).json()
     game_id, view = created["game_id"], created["state"]

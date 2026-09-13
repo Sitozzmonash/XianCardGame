@@ -107,7 +107,10 @@ class HiddenInfoProbe:
 
 
 class DeckPeekingAgent(BaseAgent):
-    """故意作弊：根据真实牌堆顶决定要不要用遁术。"""
+    """故意作弊：根据真实牌堆顶决定要不要洗牌（旧版是「要不要用遁术」）。
+
+    遁术已改为反制阶段的反应牌，行动阶段不再可用，因此作弊点改为「洗牌 / 结束回合」。
+    """
 
     name = "作弊-偷看牌堆"
 
@@ -119,7 +122,7 @@ class DeckPeekingAgent(BaseAgent):
         top = state.deck[0] if state.deck else None
         if top is Card.TRIBULATION:
             for action in legal:
-                if action.kind == ActionKind.PLAY_SKIP:
+                if action.kind == ActionKind.PLAY_SHUFFLE:
                     return action
         return legal[0]
 

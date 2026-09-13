@@ -33,7 +33,7 @@ def _fresh(num_players: int = 3, seed: int = 42, **kwargs) -> GameState:
 
 
 def _phase_states() -> dict[str, GameState]:
-    """构造 ACTION / COUNTER / REORDER / REINSERT 四个阶段的决策点。"""
+    """构造 ACTION / COUNTER / COUNTER_ESCAPE / REORDER / REINSERT 五个阶段的决策点。"""
     states: dict[str, GameState] = {}
 
     action_state = _fresh(seed=1)
@@ -46,11 +46,26 @@ def _phase_states() -> dict[str, GameState]:
     counter_state.step(Action(ActionKind.PLAY_STEAL, target=(p + 1) % 3))
     states["COUNTER"] = counter_state
 
+    # 目标手里有遁术 → 反制窗口多出「遁术（避开并结束结算）」这一反应选项
+    escape_state = _fresh(seed=2)
+    p = escape_state.current_player
+    escape_state.hands[p] = [Card.STEAL]
+    escape_state.hands[(p + 1) % 3] = [Card.SKIP, Card.PEEK]
+    escape_state.step(Action(ActionKind.PLAY_STEAL, target=(p + 1) % 3))
+    states["COUNTER_ESCAPE"] = escape_state
+
     reorder_state = _fresh(seed=3)
     p = reorder_state.current_player
     reorder_state.hands[p] = [Card.REORDER]
     reorder_state.step(Action(ActionKind.PLAY_REORDER))
     states["REORDER"] = reorder_state
+
+    # 观星术现在也进入排序阶段（与逆天改命同形的决策点）
+    peek_state = _fresh(seed=3)
+    p = peek_state.current_player
+    peek_state.hands[p] = [Card.PEEK]
+    peek_state.step(Action(ActionKind.PLAY_PEEK))
+    states["PEEK_REORDER"] = peek_state
 
     reinsert_state = _fresh(seed=4)
     p = reinsert_state.current_player
@@ -89,12 +104,22 @@ def test_agent_names():
     assert MCCFRAgent(StubMCCFRTrainer()).name == "MCCFR"
 
 
-@pytest.mark.parametrize("phase_name", ["ACTION", "COUNTER", "REORDER", "REINSERT"])
-def test_every_agent_returns_legal_action_in_every_phase(phase_name):
+@pytest.mark.parametrize(
+    "phase_name, expected_phase",
+    [
+        ("ACTION", Phase.ACTION),
+        ("COUNTER", Phase.COUNTER),
+        ("COUNTER_ESCAPE", Phase.COUNTER),
+        ("REORDER", Phase.REORDER),
+        ("PEEK_REORDER", Phase.REORDER),
+        ("REINSERT", Phase.REINSERT),
+    ],
+)
+def test_every_agent_returns_legal_action_in_every_phase(phase_name, expected_phase):
     state = _phase_states()[phase_name]
     player = state.decision_player()
     legal = state.legal_actions()
-    assert state.phase.name == phase_name
+    assert state.phase == expected_phase
     for agent in _agent_list(seed=0):
         action = agent.act(state, player)
         assert action in legal, f"{agent.name} 在 {phase_name} 给了非法动作 {action}"
@@ -156,14 +181,36 @@ def test_random_agent_is_seed_reproducible():
 # ------------------------------------------------------------------ Rule
 
 
-def test_rule_agent_avoids_known_tribulation_with_skip():
+def test_rule_agent_uses_peek_when_known_top_is_tribulation():
+    """遁术不再是主动牌 → 已知下一张是天劫时改用能改掉牌顶的牌（本例：观星术）。"""
     state = _fresh(seed=31)
     p = state.current_player
     state.hands[p] = [Card.SKIP, Card.PEEK, Card.STEAL]
     state.known_top[p] = [Card.TRIBULATION, Card.PEEK]
     state.deck = [Card.TRIBULATION, Card.PEEK, Card.SKIP]
     action = RuleAgent(0).act(state, p)
-    assert action == Action(ActionKind.PLAY_SKIP)
+    assert action == Action(ActionKind.PLAY_PEEK)
+
+
+def test_rule_agent_prefers_shuffle_over_peek_when_known_tribulation():
+    state = _fresh(seed=31)
+    p = state.current_player
+    state.hands[p] = [Card.SHUFFLE, Card.PEEK, Card.SKIP]
+    state.known_top[p] = [Card.TRIBULATION]
+    state.deck = [Card.TRIBULATION, Card.PEEK, Card.SKIP]
+    assert RuleAgent(0).act(state, p) == Action(ActionKind.PLAY_SHUFFLE)
+
+
+def test_rule_agent_never_plays_skip_outside_counter_phase():
+    """遁术是反应牌：行动阶段无论手里有几张遁术，RuleAgent 都不会选它。"""
+    state = _fresh(seed=31)
+    p = state.current_player
+    state.hands[p] = [Card.SKIP, Card.SKIP]
+    state.known_top[p] = [Card.TRIBULATION]
+    state.deck = [Card.TRIBULATION, Card.PEEK]
+    action = RuleAgent(0).act(state, p)
+    assert action.kind != ActionKind.PLAY_SKIP
+    assert action in state.legal_actions()
 
 
 def test_rule_agent_prefers_peek_when_ignorant_and_first_action():
@@ -186,6 +233,20 @@ def test_rule_agent_counters_when_able():
     # 没有反制符时只能不反制
     state.hands[target] = [Card.PEEK]
     assert RuleAgent(0).act(state, target) == Action(ActionKind.PASS_COUNTER)
+
+
+def test_rule_agent_dodges_with_escape_when_no_counter():
+    """没有反制符但有遁术 → 用遁术避开（遁术是反应牌）。"""
+    state = _fresh(seed=33)
+    p = state.current_player
+    target = (p + 1) % 3
+    state.hands[p] = [Card.STEAL]
+    state.hands[target] = [Card.SKIP, Card.PEEK]
+    state.step(Action(ActionKind.PLAY_STEAL, target=target))
+    assert RuleAgent(0).act(state, target) == Action(ActionKind.PLAY_SKIP)
+    # 二者都有时优先反制符（反弹把损失转给施术者）
+    state.hands[target] = [Card.COUNTER, Card.SKIP]
+    assert RuleAgent(0).act(state, target) == Action(ActionKind.PLAY_COUNTER)
 
 
 def test_rule_agent_reinserts_tribulation_on_top():

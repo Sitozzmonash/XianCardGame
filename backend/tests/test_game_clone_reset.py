@@ -63,6 +63,20 @@ def test_clone_rng_stays_aligned_through_random_consuming_actions():
     assert state.rng.getstate() == clone.rng.getstate()
     assert state.hands[p] == clone.hands[p]
 
+    # 反弹（规则改动）同样消耗 rng：从施术者手里随机拿一张
+    state3 = _fresh(seed=204)
+    p3 = state3.current_player
+    t3 = (p3 + 1) % 3
+    state3.hands[p3] = [Card.STEAL, Card.PEEK, Card.SHUFFLE, Card.REORDER]
+    state3.hands[t3] = [Card.COUNTER]
+    clone3 = state3.clone()
+    for s in (state3, clone3):
+        s.step(Action(ActionKind.PLAY_STEAL, target=t3))
+        s.step(Action(ActionKind.PLAY_COUNTER))
+    assert snapshot(state3) == snapshot(clone3)
+    assert state3.rng.getstate() == clone3.rng.getstate()
+    assert len(state3.hands[t3]) == 1 and len(state3.hands[p3]) == 2
+
     # REINSERT 的 NEAR_TOP 位置也消耗 rng
     state2 = _fresh(seed=203)
     p2 = state2.current_player
@@ -102,7 +116,7 @@ def test_clone_does_not_share_mutable_state():
     assert Card.PEEK not in clone.hands[1]
 
 
-@pytest.mark.parametrize("phase_kind", ["COUNTER", "REORDER", "REINSERT"])
+@pytest.mark.parametrize("phase_kind", ["COUNTER", "COUNTER_DODGE", "REORDER", "REINSERT"])
 def test_clone_preserves_pending_phase_fields(phase_kind):
     state = _fresh(seed=404)
     p = state.current_player
@@ -111,6 +125,12 @@ def test_clone_preserves_pending_phase_fields(phase_kind):
         state.hands[(p + 1) % 3] = [Card.COUNTER]
         state.step(Action(ActionKind.PLAY_STEAL, target=(p + 1) % 3))
         follow = Action(ActionKind.PLAY_COUNTER)
+    elif phase_kind == "COUNTER_DODGE":
+        # 遁术是反应牌：COUNTER 阶段 clone 后打出必须与原件一致（含回合推进）
+        state.hands[p] = [Card.STEAL]
+        state.hands[(p + 1) % 3] = [Card.SKIP, Card.PEEK]
+        state.step(Action(ActionKind.PLAY_STEAL, target=(p + 1) % 3))
+        follow = Action(ActionKind.PLAY_SKIP)
     elif phase_kind == "REORDER":
         state.hands[p] = [Card.REORDER]
         state.step(Action(ActionKind.PLAY_REORDER))
@@ -127,10 +147,31 @@ def test_clone_preserves_pending_phase_fields(phase_kind):
     assert clone.pending_target == state.pending_target
     assert clone.reorder_owner == state.reorder_owner
     assert clone.reorder_view == state.reorder_view
+    assert clone.reorder_card == state.reorder_card
     assert clone.reinsert_player == state.reinsert_player
     state.step(follow)
     clone.step(follow)
     assert diff_snapshot(snapshot(state), snapshot(clone)) == []
+
+
+def test_clone_copies_reorder_card_and_peek_reorder_state():
+    """观星术开的 REORDER 也要能被 clone（含触发牌 `reorder_card`）。"""
+    state = _fresh(seed=405)
+    p = state.current_player
+    state.hands[p] = [Card.PEEK]
+    state.step(Action(ActionKind.PLAY_PEEK))
+    assert state.reorder_card is Card.PEEK
+
+    clone = state.clone()
+    assert clone.reorder_card is Card.PEEK
+    assert clone.reorder_view == state.reorder_view
+    clone.reorder_card = Card.REORDER  # 改 clone 不影响原件
+    assert state.reorder_card is Card.PEEK
+    clone.reorder_card = Card.PEEK  # 复原（否则两侧日志会不同）
+
+    for s in (state, clone):
+        s.step(Action(ActionKind.REORDER_TOP, param="210"))
+    assert snapshot(state) == snapshot(clone)
 
 
 def test_clone_of_terminal_state():

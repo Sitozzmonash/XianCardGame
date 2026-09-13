@@ -159,7 +159,11 @@ class GameState:
     def debug_string(self, reveal_all: bool = False) -> str
 ```
 - 规则语义**必须**与 `reference/xiuxian_ai_demo/xiuxian/game.py` 等价（除 infoset 编码与
-  `observation` 结构调整外，逐条行为一致）。C2 必须写测试证明黄金种子下与参考实现逐步一致。
+  `observation` 结构调整外，逐条行为一致）——**唯一例外是附录 A13 记录的三张牌规则**：
+  观星术（查看 + 改序）、遁术（反应牌 / 避开法术）、反制符（取消 → 反弹）。
+  卡牌功能以用户提供的前端参考原型文案为准，参考实现是旧规则，因此 C2 的对照测试
+  改为「只对**未改动分支**逐步零差异 + 偏离白名单显式列出」（`tests/_game_test_utils.py`
+  的 `DEVIATION_ACTION_KINDS` / `assert_action_parity()`）。
 - `step()` 里 `decision_count > max_decisions` → `forced_stop=True, phase=ENDED`（平局），保持参考行为。
 
 ### 1.5 紧凑 Information Set（关键改动）
@@ -218,7 +222,7 @@ def infoset_key(self, player: int) -> tuple   # 返回值必须全部由 int / t
 | PEEK | `STARGAZING` | 观星术 | ACTIVE | stargazing |
 | REORDER | `REWRITE_FATE` | 逆天改命 | ACTIVE | rewrite_fate |
 | SHUFFLE | `SHUFFLE` | 扰乱天机 | ACTIVE | shuffle |
-| SKIP | `ESCAPE` | 遁术 | ACTIVE | escape |
+| SKIP | `ESCAPE` | 遁术 | REACTIVE | escape |
 | STEAL | `STEAL` | 摄物术 | ACTIVE | steal |
 | COUNTER | `COUNTER` | 反制符 | REACTIVE | counter |
 
@@ -227,9 +231,11 @@ def infoset_key(self, player: int) -> tuple   # 返回值必须全部由 int / t
 | ActionKind | api type | 说明 |
 |---|---|---|
 | END_TURN | `END_ACTION` | label「结束行动并抽牌」 |
-| PLAY_PEEK/PLAY_REORDER/PLAY_SHUFFLE/PLAY_SKIP | `PLAY_CARD` | 带 `card_instance_id` |
+| PLAY_PEEK | `PLAY_CARD` | 带 `card_instance_id`；打出后进入 `Phase.REORDER`（查看 + 改序） |
+| PLAY_REORDER/PLAY_SHUFFLE | `PLAY_CARD` | 带 `card_instance_id` |
+| PLAY_SKIP | `ESCAPE` | **反应牌**：仅 `Phase.COUNTER` 出现，带 `card_instance_id`（见附录 A13） |
 | PLAY_STEAL | `PLAY_CARD_TARGET` | `params.target_player = {type:"enum", options:[...]}` |
-| PLAY_COUNTER | `COUNTER` | |
+| PLAY_COUNTER | `COUNTER` | 反制 = 反弹（施术者反被偷） |
 | PASS_COUNTER | `PASS_COUNTER` | |
 | REORDER_TOP | `REORDER_TOP` | `params.order = {type:"token_order"}` |
 | REINSERT | `REINSERT_TRIBULATION` | `params.region = {type:"enum", options:[TOP,NEAR_TOP,MIDDLE,BOTTOM]}` |
@@ -598,6 +604,9 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 | A10 | 模型人数 ≠ 对局人数 | **不拒绝请求**（保留对照实验自由），但必须显式暴露：`public.players[].agent` 里带 `model_players` / `game_players` / `players_mismatch`，并写中文 WARNING 日志（含对应训练命令）。原因：跨人数键空间不重叠，静默退化到 RuleAgent 最危险。 |
 | A11 | 动作空间是**牌类型级**而非实例级 | 引擎 `legal_actions()` 用 `if Card.PEEK in hand` 这种类型判断（与参考实现一致，为保住「同种子 2815 步零差异」**不改引擎**）：手里有两张同名牌时 `legal_actions` 只有**一条** `PLAY_CARD`，`card_instance_id` 指向**第一个匹配实例**（实测 seed=4：手牌 `h_0_2`/`h_0_4` 均为 STARGAZING，动作只给 `h_0_2`）。**约定**：消费方必须把同 `card_id` 的其它实例视为同样可打（前端 `actionsForCard` 已做此兜底），否则第二张会被误标「不可用」。若将来改成实例级动作，须同步重训模型 + 更新参考实现对照测试。 |
 | A12 | 手牌实例 id 是**位置性**的 | 形如 `h_<player>_<index>`；出牌/抽牌后整手牌重新编号（实测：打掉 index 2 后原 `h_0_3`/`h_0_4` 变为 `h_0_2`/`h_0_3`），`legal_actions[].id` 也随之变化。⇒ 前端不得跨 revision 缓存 `instance_id` / `action_id`，提交必须带 `revision`（旧 revision 一律 409）。 |
+| A13 | 卡牌规则按**用户提供的前端参考原型文案**调整，与只读参考实现 `reference/xiuxian_ai_demo` 的旧规则**有意偏离**（2026-09-13 用户裁决：卡牌功能以原型文案为准） | 三条：① **观星术** `PLAY_PEEK` = 查看 + 改序（打出后进入 `Phase.REORDER`，复用 `private_1..k` token 机制，与逆天改命同一条决策）；② **遁术** 从「行动阶段主动跳过抽牌」改为 `Phase.COUNTER` 的**反应牌**（api type 由 `PLAY_CARD` 改为 `ESCAPE`），效果 =「该法术完全无效 + 立即结束本次结算（施术者按 `_advance_turn_from` 推进、不抽牌）」，遁术与已打出的摄物术都进弃牌堆；③ **反制符** 从「取消」改为**反弹**（原目标反偷原施术者 1 张手牌，反制链深度仍固定 1）。枚举**表面**不变（`ActionKind.PLAY_SKIP` 名称与中文 value 保持，`Phase` 不新增成员 ⇒ 信息集 phase 序号 0..4 不变），偏离的是语义与 `API_ACTION_TYPE`。事件流：新增 `ESCAPE_DODGED`；`COUNTER_USED` 带 `data.redirected=true`/`data.stolen`，反弹时补一条 `CARD_STOLEN`(`data.redirected=true`, `actor`=反弹方)；`TURN_SKIPPED` 保留但不再产生。⇒ **已训 MCCFR 模型部分失效**（旧规则下的信息集/动作语义不再命中），需重训；`tests/test_game_reference_parity.py` 改为「只对未改动分支零差异 + 偏离白名单」，实现清单见 `docs/CARD_RULES_DELTA.md`。 |
+
+| A14 | 后端 `phase` 的**线上值与前端内部枚举名不同**，前端曾因此静默降级 | 后端 `PHASE_API_NAME`（`game/state.py`）发 `ACTION` / `COUNTER` / **`REORDER_TOP`** / **`REINSERT_TRIBULATION`** / `ENDED`；前端内部 `Phase` 是 `ACTION`/`COUNTER`/`REORDER`/`REINSERT`/`ENDED`。曾用「白名单包含即用，否则回落 `ACTION`」实现 ⇒ `REORDER_TOP`/`REINSERT_TRIBULATION` **永远匹配不上**，按 phase 驱动的排序/回插弹窗在真后端下永不弹出（mock 因自带内部名而掩盖）。**约定**：`src/api/game.ts` 必须用**显式映射表**（`PHASE_FROM_API`）转换，且新增 phase 时两端同步；判断「该弹窗该不该出现」一律以 `legal_actions` 为准，`phase` 只用于文案。 |
 
 ---
 
@@ -610,3 +619,5 @@ SESSION_TTL_SECONDS=3600, MAX_SESSIONS=200, ISMCTS_MAX_SIMULATIONS=2000
 | 2026-09-12 | 新增 §4.1 响应字段严格白名单 | 上游/实现各自加字段导致泄漏面扩大与契约漂移 |
 | 2026-09-12 | 新增附录 A 歧义裁决 | 多 Agent 并行时同名信息出现两种命名（`deck_size` vs `deck_count`）等 |
 | 2026-09-12 | §3.5 载入预算拆成「懒加载 ≤5 s（部署/首请求）/ 全量展开 ≤10 s（续训）」 | 两种路径用途不同；且实测全量展开的墙钟时间主要受进程内存状态与 CPU 争用影响，原一刀切的 5 s 口径会得出误导性结论 |
+| 2026-09-13 | 附录 A13：三张卡牌规则按用户提供的前端原型文案调整（观星术 + 改序 / 遁术 → 反应牌 / 反制符 取消 → 反弹），同步 §1.1 §1.3 §1.7 与 `docs/API_CONTRACT.md` §12.3 §12.4 §13 §14 §18 | 用户裁决「卡牌功能以原型文案为准」；参考实现只读、不跟随，故必须显式记录**有意偏离**并收窄对照测试口径 |
+| 2026-09-13 | 附录 A14：后端 `phase` 线上值与前端内部枚举名必须显式映射（`REORDER_TOP`/`REINSERT_TRIBULATION`） | 前端白名单式转换把两个阶段静默回落成 `ACTION`，导致真后端下排序/回插弹窗永不出现（mock 掩盖了该问题） |

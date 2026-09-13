@@ -1,5 +1,24 @@
 """与参考实现 `reference/xiuxian_ai_demo` 的逐步等价性测试（INTERFACES §1.4 硬指标）。
 
+⚠ **有意偏离（2026-09-13，用户裁决）**：卡牌规则按用户提供的前端原型文案调整了三条
+（`docs/CARD_RULES_DELTA.md`，裁决见 `docs/INTERFACES.md` 附录 A13），参考实现仍是旧规则：
+
+| 牌型 | 旧（参考实现） | 新（本仓） |
+|---|---|---|
+| 观星术 `PLAY_PEEK` | 只看牌顶，动作结束 | 查看 + 改序（进入 `Phase.REORDER`） |
+| 遁术 `PLAY_SKIP` | 行动阶段主动跳过抽牌 | `Phase.COUNTER` 反应牌：避开法术并立即结束结算 |
+| 反制符 `PLAY_COUNTER` | 取消摄物术 | 反弹（原施术者反被偷 1 张） |
+
+因此本文件**不再声称全量零差异**，而是「只对照未改动的规则分支」：
+
+* 逐步对比（`drive_lockstep`）每一步都断言：两侧合法动作的对称差集 ⊆ {遁术}，
+  去掉遁术后**集合与顺序完全一致**；动作序列固定在非偏离子集上，快照 / rng / 中文日志
+  仍要求逐步零差异；
+* agent 驱动时两侧都用 `DeviationFilteredAgent` 包一层（偏离选择换成第一个非偏离动作），
+  因此动作序列逐条相同、对账能力保留；
+* `test_intentional_deviations_are_real_and_whitelisted` 正向断言这三个偏离点确实存在
+  （防止规则被悄悄改回参考实现）。
+
 内容：
 1. 同 seed 初始状态 / rng 状态完全一致；
 2. 同 seed + 同动作序列逐步对比（phase / current_player / hands / deck / alive /
@@ -24,6 +43,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _game_test_utils import (  # noqa: E402
+    DEVIATION_ACTION_KINDS,
+    SKIP_ACTION_KEY,
+    assert_action_parity,
+    shared_actions,
     legacy_repr_key,
     drive_lockstep,
     ensure_reference_importable,
@@ -34,7 +57,7 @@ from _game_test_utils import (  # noqa: E402
 
 from agents import RandomAgent, RuleAgent  # noqa: E402
 from game import GameConfig, GameState  # noqa: E402
-from game.actions import API_ACTION_TYPE, ActionKind  # noqa: E402
+from game.actions import API_ACTION_TYPE, Action, ActionKind  # noqa: E402
 from game.cards import CARD_ORDER, API_CARD_ID, Card  # noqa: E402
 from game.state import Phase  # noqa: E402
 
@@ -135,7 +158,9 @@ def test_compact_key_is_bijective_with_reference_repr_key():
                 assert repr_to_tuple[ref_key] == new_key
                 assert tuple_to_repr[new_key] == ref_key
                 samples += 1
-            action = chooser.choice(mine.legal_actions())
+            # 只在未改动的规则分支上驱动（观星术/遁术/反制符已按原型改过，见文件头）
+            assert_action_parity(mine, other)
+            action = chooser.choice(shared_actions(mine.legal_actions()))
             mine.step(action)
             other.step(to_ref_action(action))
     print(
@@ -156,7 +181,7 @@ def test_determinize_matches_reference_for_same_seed():
         for _ in range(12):  # 走到一半再对比
             if mine.is_terminal():
                 break
-            action = chooser.choice(mine.legal_actions())
+            action = chooser.choice(shared_actions(mine.legal_actions()))
             mine.step(action)
             other.step(to_ref_action(action))
         for observer in range(3):
@@ -170,6 +195,11 @@ def test_determinize_matches_reference_for_same_seed():
 
 
 def test_enum_values_match_reference():
+    """枚举表面（成员名 / 中文 value）与参考实现一致 —— 有意偏离的是**语义**，不是枚举。
+
+    `PLAY_SKIP` 仍然是 `"使用遁术"`，但已从行动阶段牌改为 COUNTER 阶段反应牌，
+    api type 也由 `PLAY_CARD` 改为 `ESCAPE`（见 `test_intentional_deviations_are_real_and_whitelisted`）。
+    """
     assert [c.value for c in Card] == [c.value for c in REF["RefCard"]]
     assert [c.name for c in Card] == [c.name for c in REF["RefCard"]]
     assert [p.value for p in Phase] == [p.value for p in REF["RefPhase"]]
@@ -190,6 +220,86 @@ def test_enum_values_match_reference():
         "STEAL",
         "COUNTER",
     ]
+
+
+def test_intentional_deviations_are_real_and_whitelisted():
+    """三个偏离点必须「真的偏离」参考实现（防止规则被悄悄改回旧版）。
+
+    白名单在 `tests/_game_test_utils.py`（`DEVIATION_ACTION_KINDS`），
+    规则来源：用户提供的前端原型文案 + `docs/CARD_RULES_DELTA.md`。
+    """
+    assert DEVIATION_ACTION_KINDS == {"PLAY_PEEK", "PLAY_SKIP", "PLAY_COUNTER"}
+    assert SKIP_ACTION_KEY == Action(ActionKind.PLAY_SKIP).key() == "使用遁术|-1|"
+    assert API_ACTION_TYPE[ActionKind.PLAY_PEEK] == "PLAY_CARD"
+    assert API_ACTION_TYPE[ActionKind.PLAY_SKIP] == "ESCAPE"  # 旧：PLAY_CARD
+    assert API_ACTION_TYPE[ActionKind.PLAY_COUNTER] == "COUNTER"
+
+    RefCard = REF["RefCard"]
+    RefAction = REF["RefAction"]
+    RefActionKind = REF["RefActionKind"]
+
+    def pair(seed: int, num_players: int = 3):
+        return (
+            GameState(GameConfig(num_players=num_players, seed=seed), seed),
+            REF["RefGameState"](
+                REF["RefGameConfig"](num_players=num_players, seed=seed), seed
+            ),
+        )
+
+    # ① 观星术：本仓「查看 + 改序」（进入 REORDER），参考实现看完就结束
+    mine, other = pair(6)
+    p = mine.current_player
+    assert p == other.current_player
+    mine.hands[p] = [Card.PEEK]
+    other.hands[p] = [RefCard.PEEK]
+    assert other.phase.name == "ACTION"
+    mine.step(Action(ActionKind.PLAY_PEEK))
+    other.step(RefAction(RefActionKind.PLAY_PEEK))
+    assert mine.phase == Phase.REORDER and mine.reorder_owner == p
+    assert len(mine.legal_actions()) == 6  # 3! 个排列
+    assert other.phase.name == "ACTION"  # 旧规则：不进入排序
+    assert all(a.kind.name != "REORDER_TOP" for a in other.legal_actions())
+
+    # ② 遁术：行动阶段不再可用；COUNTER 阶段多出一条反应动作
+    #    （两侧枚举是不同类，因此比较 `key()` 字符串）
+    mine, other = pair(12)
+    p = mine.current_player
+    target = (p + 1) % 3
+    mine.hands[p] = [Card.SKIP]
+    other.hands[p] = [RefCard.SKIP]
+    assert SKIP_ACTION_KEY in {a.key() for a in other.legal_actions()}
+    assert SKIP_ACTION_KEY not in {a.key() for a in mine.legal_actions()}
+    assert_action_parity(mine, other)
+
+    mine, other = pair(12)
+    p = mine.current_player
+    target = (p + 1) % 3
+    mine.hands[p] = [Card.STEAL]
+    other.hands[p] = [RefCard.STEAL]
+    mine.hands[target] = [Card.SKIP]
+    other.hands[target] = [RefCard.SKIP]
+    mine.step(Action(ActionKind.PLAY_STEAL, target=target))
+    other.step(RefAction(RefActionKind.PLAY_STEAL, target))
+    assert SKIP_ACTION_KEY in {a.key() for a in mine.legal_actions()}  # 新：遁术是反应牌
+    assert SKIP_ACTION_KEY not in {a.key() for a in other.legal_actions()}  # 旧：反制阶段只有 2 个选项
+    assert_action_parity(mine, other)
+
+    # ③ 反制符：本仓反弹（施术者反被偷），参考实现只是取消
+    mine, other = pair(14)
+    p = mine.current_player
+    target = (p + 1) % 3
+    mine.hands[p] = [Card.STEAL, Card.PEEK]
+    other.hands[p] = [RefCard.STEAL, RefCard.PEEK]
+    mine.hands[target] = [Card.COUNTER]
+    other.hands[target] = [RefCard.COUNTER]
+    mine.step(Action(ActionKind.PLAY_STEAL, target=target))
+    other.step(RefAction(RefActionKind.PLAY_STEAL, target))
+    mine.step(Action(ActionKind.PLAY_COUNTER))
+    other.step(RefAction(RefActionKind.PLAY_COUNTER))
+    assert mine.hands[target] == [Card.PEEK]  # 反弹：原目标反而拿到 1 张
+    assert mine.hands[p] == []  # 施术者被反偷
+    assert other.hands[target] == []  # 旧规则：取消 → 双方都不动
+    assert other.hands[p] == [RefCard.PEEK]
 
 
 def test_reference_smoke_scenarios_still_pass():

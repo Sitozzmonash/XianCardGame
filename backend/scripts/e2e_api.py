@@ -13,7 +13,8 @@
     2. GameView / PlayerPublicView / Observation 的字段白名单 —— 不含 deck、他人手牌、他人观星结果
     3. observation.hand 的 instance_id 前缀必须是自己的座位（h_<seat>_）
     4. legal_actions 非空、字段结构合法、action_id 可被后端接受
-    5. 4 种特殊决策（反制 / 摄物术选目标 / 逆天改命排序 / 天劫回插）都能被真实走通
+    5. 5 类特殊决策（反制反弹 / 遁术避开 / 摄物术选目标 / 观星术或逆天改命排序 / 天劫回插）
+       都能被真实走通
     6. revision 单调递增；用旧 revision 重复提交同一动作必须被拒（防重复提交）
     7. 一局最终必须终止（status=ended 且 winner 非空），且不触发 forced_stop
 """
@@ -105,8 +106,9 @@ def pick_action(view: dict[str, Any], rng_pick: int) -> tuple[str, dict]:
         raise RuntimeError("legal_actions 为空，但游戏未结束")
 
     priority = {
-        "PASS_COUNTER": 0, "COUNTER": 1, "REORDER_TOP": 2, "REINSERT_TRIBULATION": 3,
-        "PLAY_CARD_TARGET": 4, "PLAY_CARD": 5, "END_ACTION": 9, "PLAY_CARD_TARGET": 4,
+        "PASS_COUNTER": 0, "COUNTER": 1, "ESCAPE": 2, "REORDER_TOP": 3,
+        "REINSERT_TRIBULATION": 4, "PLAY_CARD_TARGET": 5, "PLAY_CARD": 6,
+        "END_ACTION": 9,
     }
     legal_sorted = sorted(legal, key=lambda a: priority.get(a.get("type", ""), 6))
     action = legal_sorted[rng_pick % max(1, min(3, len(legal_sorted)))]
@@ -129,7 +131,7 @@ def pick_action(view: dict[str, Any], rng_pick: int) -> tuple[str, dict]:
             raise RuntimeError("PLAY_CARD_TARGET 缺少 target_player.options")
         payload = {"target_player": opts[0]}
 
-    if atype in ("REORDER_TOP", "REINSERT_TRIBULATION", "COUNTER", "PASS_COUNTER", "PLAY_CARD_TARGET"):
+    if atype in ("REORDER_TOP", "REINSERT_TRIBULATION", "COUNTER", "PASS_COUNTER", "ESCAPE", "PLAY_CARD_TARGET"):
         PHASE_HITS.add(atype)
     return action["id"], payload
 

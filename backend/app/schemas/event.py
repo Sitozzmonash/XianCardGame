@@ -17,7 +17,11 @@ from enum import Enum
 
 
 class EventKind(str, Enum):
-    """API_CONTRACT §13 的 18 种事件类型（缺一不可）。"""
+    """API_CONTRACT §13 的事件类型（19 种）。
+
+    其中 `TURN_SKIPPED` 为**历史保留**：遁术改为反制阶段的反应牌后，引擎不再产生该事件
+    （前端可继续渲染历史日志，但新对局不会出现）。新增 `ESCAPE_DODGED` 表达「遁术避开法术」。
+    """
 
     GAME_STARTED = "GAME_STARTED"
     TURN_STARTED = "TURN_STARTED"
@@ -31,6 +35,7 @@ class EventKind(str, Enum):
     DECK_REORDERED = "DECK_REORDERED"
     DECK_SHUFFLED = "DECK_SHUFFLED"
     TURN_SKIPPED = "TURN_SKIPPED"
+    ESCAPE_DODGED = "ESCAPE_DODGED"
     TRIBULATION_DRAWN = "TRIBULATION_DRAWN"
     TRIBULATION_DEFUSED = "TRIBULATION_DEFUSED"
     TRIBULATION_REINSERTED = "TRIBULATION_REINSERTED"

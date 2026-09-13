@@ -244,7 +244,11 @@ def test_elimination_of_second_player_ends_game():
 # --------------------------------------------------------------------- 观星术
 
 
-def test_peek_sets_known_top_to_top_three():
+def test_peek_sets_known_top_and_opens_reorder():
+    """观星术 = 查看 + 改序：进入 REORDER 决策，提交排列后顶部顺序生效。
+
+    规则改动（原型文案）：`docs/CARD_RULES_DELTA.md` §2.1。
+    """
     state = fresh(num_players=3, seed=6)
     p = state.current_player
     state.hands[p] = [Card.PEEK, Card.SKIP]
@@ -254,8 +258,21 @@ def test_peek_sets_known_top_to_top_three():
     assert state.known_top[(p + 1) % 3] == []
     assert Card.PEEK not in state.hands[p] and Card.PEEK in state.discard
     assert state.actions_used == 1
-    assert state.phase == Phase.ACTION  # 观星不结束回合
+    # 不再直接结束动作，而是进入排序阶段（与逆天改命同一条私有 token 决策）
+    assert state.phase == Phase.REORDER
+    assert state.reorder_owner == p
+    assert state.reorder_view == top3
+    assert state.reorder_card is Card.PEEK
+    assert len(state.legal_actions()) == 6  # 3! 个排列
     assert "观星术" in state.logs[-1]
+
+    state.step(Action(ActionKind.REORDER_TOP, param="210"))
+    assert state.deck[:3] == [top3[2], top3[1], top3[0]]  # 排列真的生效
+    assert state.known_top[p] == [top3[2], top3[1], top3[0]]
+    assert state.phase == Phase.ACTION  # 提交后回到正常阶段
+    assert state.reorder_owner is None and state.reorder_view == []
+    assert state.reorder_card is None
+    assert "完成【观星术】" in state.logs[-1]
 
 
 def test_peek_with_short_deck():
@@ -265,6 +282,11 @@ def test_peek_with_short_deck():
     state.deck = [Card.SKIP, Card.STEAL]
     state.step(Action(ActionKind.PLAY_PEEK))
     assert state.known_top[p] == [Card.SKIP, Card.STEAL]
+    assert state.phase == Phase.REORDER
+    assert state.reorder_view == [Card.SKIP, Card.STEAL]
+    assert len(state.legal_actions()) == 2  # 2! 个排列
+    state.step(Action(ActionKind.REORDER_TOP, param="10"))
+    assert state.deck == [Card.STEAL, Card.SKIP]
 
 
 def test_peek_not_legal_without_card_or_deck():
@@ -355,23 +377,56 @@ def test_shuffle_not_legal_with_single_card_deck():
 
 # --------------------------------------------------------------------- 遁术
 
+# 遁术已从「行动阶段主动跳过抽牌」改为「反制窗口的反应牌」（`docs/CARD_RULES_DELTA.md` §2.2）：
+# 行动阶段不再出现，被法术指向时可用以避开法术并立即结束本次结算。
 
-def test_skip_ends_turn_without_drawing():
+
+def test_escape_is_not_playable_in_action_phase():
     state = fresh(num_players=3, seed=12)
     p = state.current_player
     state.hands[p] = [Card.SKIP]
+    kinds = {a.kind for a in state.legal_actions()}
+    assert ActionKind.PLAY_SKIP not in kinds
+    assert kinds == {ActionKind.END_TURN}
+    with pytest.raises(ValueError):
+        state.step(Action(ActionKind.PLAY_SKIP))
+
+
+def test_escape_dodges_steal_and_ends_settlement():
+    state = fresh(num_players=3, seed=12)
+    p = state.current_player
+    target = (p + 1) % 3
+    state.hands[p] = [Card.STEAL]
+    state.hands[target] = [Card.SKIP, Card.PEEK]
+    state.step(Action(ActionKind.PLAY_STEAL, target=target))
+    assert state.phase == Phase.COUNTER
+    assert {a.kind for a in state.legal_actions()} == {
+        ActionKind.PASS_COUNTER,
+        ActionKind.PLAY_SKIP,
+    }
+
     deck_before = list(state.deck)
     state.step(Action(ActionKind.PLAY_SKIP))
-    assert state.deck == deck_before  # 不抽牌
-    assert state.current_player == (p + 1) % 3
+    # 法术完全无效：目标一张牌都不丢
+    assert state.hands[target] == [Card.PEEK]
+    assert state.hands[p] == []  # 施术者也没得到牌
+    assert Card.SKIP in state.discard  # 遁术进弃牌堆
+    assert Card.STEAL in state.discard  # 摄物术已打出，同样进弃牌堆
+    # 立即结束本次结算：施术者的回合结束，按 _advance_turn_from 推进（不抽牌）
+    assert state.phase == Phase.ACTION
+    assert state.pending_actor is None and state.pending_target is None
+    assert state.current_player != p
+    assert state.current_player == (p + 1) % 3  # 轮到施术者的下一家（本例即遁术使用者）
     assert state.turn_no == 2
-    assert state.logs[-1] == f"P{p} 使用【遁术】，本回合不抽牌。"
+    assert state.deck == deck_before
+    assert state.logs[-1] == f"P{target} 使用【遁术】，避开了 P{p} 的【摄物术】，本次结算立即结束。"
 
 
 # --------------------------------------------------------------------- 摄物术 / 反制
 
 
-def test_steal_opens_counter_phase_and_counter_cancels():
+def test_steal_opens_counter_phase_and_counter_redirects():
+    """反制符 = 反弹：原施术者反被偷 1 张（`docs/CARD_RULES_DELTA.md` §2.3）。"""
     state = fresh(num_players=3, seed=14)
     p = state.current_player
     target = (p + 1) % 3
@@ -387,11 +442,32 @@ def test_steal_opens_counter_phase_and_counter_cancels():
     ]
     state.step(Action(ActionKind.PLAY_COUNTER))
     assert state.phase == Phase.ACTION
-    assert state.current_player == p  # 回到使用者
+    assert state.current_player == p  # 回到使用者（他的行动阶段继续）
     assert Card.COUNTER in state.discard
-    assert state.hands[target] == [Card.PEEK]  # 没被偷
-    assert state.hands[p] == [Card.SKIP]
-    assert state.logs[-1] == f"P{target} 使用【反制符】，取消 P{p} 的【摄物术】。"
+    # 原目标没被偷，反而反偷了施术者一张
+    assert len(state.hands[target]) == 2
+    assert Card.PEEK in state.hands[target] and Card.SKIP in state.hands[target]
+    assert state.hands[p] == []  # 施术者的 SKIP 被反偷走
+    assert state.logs[-1] == (
+        f"P{target} 使用【反制符】，P{p} 的【摄物术】被反弹，P{target} 反偷走 P{p} 1 张手牌。"
+    )
+
+
+def test_counter_with_empty_caster_hand_steals_nothing():
+    """施术者手里已经没牌时，反弹没有任何牌可偷（不能凭空造牌）。"""
+    state = fresh(num_players=3, seed=14)
+    p = state.current_player
+    target = (p + 1) % 3
+    state.hands[p] = [Card.STEAL]
+    state.hands[target] = [Card.COUNTER]
+    state.step(Action(ActionKind.PLAY_STEAL, target=target))
+    state.step(Action(ActionKind.PLAY_COUNTER))
+    assert state.hands[p] == []
+    assert state.hands[target] == []
+    assert state.phase == Phase.ACTION
+    assert state.logs[-1] == (
+        f"P{target} 使用【反制符】，P{p} 的【摄物术】被反弹，但 P{p} 已无手牌可偷。"
+    )
 
 
 def test_steal_transfers_random_card_when_not_countered():
@@ -422,17 +498,40 @@ def test_steal_needs_living_target_with_cards():
 
 
 def test_counter_chain_depth_is_one():
-    """反制符不能再被反制：COUNTER 阶段只有 PASS / PLAY_COUNTER 两个动作。"""
+    """反制链深度固定 1：COUNTER 阶段只有「不反制 / 反制符 / 遁术」三个反应选项。"""
     state = fresh(num_players=3, seed=17)
     p = state.current_player
     target = (p + 1) % 3
-    state.hands[p] = [Card.STEAL]
+    state.hands[p] = [Card.STEAL, Card.COUNTER]
     state.hands[target] = [Card.COUNTER]
     state.step(Action(ActionKind.PLAY_STEAL, target=target))
     kinds = {a.kind for a in state.legal_actions()}
     assert kinds == {ActionKind.PASS_COUNTER, ActionKind.PLAY_COUNTER}
     state.step(Action(ActionKind.PLAY_COUNTER))
+    # 反制立即结算完成，不会再给施术者一个「反制反制」的窗口
     assert state.phase == Phase.ACTION
+    assert state.current_player == p
+    after = {a.kind for a in state.legal_actions()}
+    assert ActionKind.PLAY_COUNTER not in after
+    assert ActionKind.PASS_COUNTER not in after
+    assert ActionKind.END_TURN in after
+    # 反弹把施术者手里唯一那张牌拿走了（施术者手里本来就只有 STEAL + COUNTER）
+    assert state.hands[p] == []
+    assert state.hands[target] == [Card.COUNTER]
+
+    # 目标手里有遁术时，反制窗口多出「遁术」这一条反应选项（链深度仍为 1）
+    state2 = fresh(num_players=3, seed=17)
+    p2 = state2.current_player
+    target2 = (p2 + 1) % 3
+    state2.hands[p2] = [Card.STEAL]
+    state2.hands[target2] = [Card.COUNTER, Card.SKIP]
+    state2.step(Action(ActionKind.PLAY_STEAL, target=target2))
+    kinds2 = {a.kind for a in state2.legal_actions()}
+    assert kinds2 == {
+        ActionKind.PASS_COUNTER,
+        ActionKind.PLAY_COUNTER,
+        ActionKind.PLAY_SKIP,
+    }
 
 
 # ----------------------------------------------------- 行动次数上限 / 强制结束
@@ -441,17 +540,23 @@ def test_counter_chain_depth_is_one():
 def test_max_actions_per_turn_limits_legal_actions():
     state = fresh(num_players=3, seed=18, max_actions_per_turn=2)
     p = state.current_player
-    state.hands[p] = [Card.PEEK, Card.SKIP, Card.STEAL, Card.REORDER]
+    state.hands[p] = [Card.PEEK, Card.SHUFFLE, Card.STEAL, Card.REORDER]
     state.step(Action(ActionKind.PLAY_PEEK))
     assert state.actions_used == 1
-    state.step(Action(ActionKind.PLAY_SKIP))  # 第二张主动牌 + 立即结束回合
-    assert state.current_player != p
-    assert state.actions_used == 0  # 新回合重置
+    # 观星术现在会进入排序阶段：排序决策本身不计入行动数
+    assert state.phase == Phase.REORDER
+    state.step(Action(ActionKind.REORDER_TOP, param="012"))
+    assert state.actions_used == 1
+    assert state.phase == Phase.ACTION
+    kinds = {a.kind for a in state.legal_actions()}
+    assert ActionKind.END_TURN in kinds
+    assert ActionKind.PLAY_SHUFFLE in kinds  # 第二张主动牌仍然可用
 
     state = fresh(num_players=3, seed=18, max_actions_per_turn=1)
     p = state.current_player
-    state.hands[p] = [Card.PEEK, Card.SKIP]
+    state.hands[p] = [Card.PEEK, Card.SHUFFLE]
     state.step(Action(ActionKind.PLAY_PEEK))
+    state.step(Action(ActionKind.REORDER_TOP, param="012"))
     assert state.actions_used == 1
     assert state.legal_actions() == [Action(ActionKind.END_TURN)]
 
@@ -507,6 +612,10 @@ def test_illegal_action_raises_value_error():
         state.step(Action(ActionKind.PLAY_STEAL, target=p))  # 不能偷自己
     with pytest.raises(ValueError):
         state.step(Action(ActionKind.REINSERT, param="TOP"))  # 阶段不对
+    # 遁术已改为反应牌：行动阶段打出即非法（即使手里有遁术）
+    assert Action(ActionKind.PLAY_SKIP) not in state.legal_actions()
+    with pytest.raises(ValueError):
+        state.step(Action(ActionKind.PLAY_SKIP))
 
 
 def test_terminal_state_has_no_legal_actions():

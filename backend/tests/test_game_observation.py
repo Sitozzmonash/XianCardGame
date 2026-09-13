@@ -123,6 +123,23 @@ def test_observation_private_context_only_for_reorder_owner():
             assert state.observation(other)["private_context"] is None
 
 
+def test_observation_private_context_after_peek():
+    """规则改动：观星术现在也会进入 REORDER，因此同样下发 private_context。"""
+    state = _fresh(seed=31)
+    owner = state.current_player
+    state.hands[owner] = [Card.PEEK]
+    state.step(Action(ActionKind.PLAY_PEEK))
+    assert state.phase == Phase.REORDER
+
+    ctx = state.observation(owner)["private_context"]
+    assert ctx is not None
+    assert [e["token"] for e in ctx["cards"]] == ["private_1", "private_2", "private_3"]
+    assert [e["card_id"] for e in ctx["cards"]] == _ids(state.reorder_view)
+    for other in range(state.num_players):
+        if other != owner:
+            assert state.observation(other)["private_context"] is None
+
+
 # ------------------------------------------------------------------ public_state
 
 

@@ -96,7 +96,8 @@ CARD_SPECS: tuple[CardSpec, ...] = (
         id="STARGAZING",
         name="观星术",
         category="ACTIVE",
-        description="查看牌堆顶部最多 3 张牌，只有自己知道看到的内容。",
+        # 文案以用户提供的参考前端原型为准（docs/CARD_RULES_DELTA.md §1 #3）。
+        description="查看牌堆顶部最多 3 张牌，并重新调整顺序。",
         asset="stargazing",
     ),
     CardSpec(
@@ -116,22 +117,24 @@ CARD_SPECS: tuple[CardSpec, ...] = (
     CardSpec(
         id="ESCAPE",
         name="遁术",
-        category="ACTIVE",
-        description="立即结束自己的回合，且本回合不抽牌。",
+        category="REACTIVE",
+        # 文案以用户提供的参考前端原型为准（docs/CARD_RULES_DELTA.md §2.2）。
+        description="避开一次指向你的法术，并立即结束当前结算。",
         asset="escape",
     ),
     CardSpec(
         id="STEAL",
         name="摄物术",
         category="ACTIVE",
-        description="指定另一名存活玩家，随机偷取对方 1 张手牌；目标可以使用反制符取消。",
+        description="指定另一名存活玩家，随机偷取对方 1 张手牌；目标可以使用反制符反弹或遁术避开。",
         asset="steal",
     ),
     CardSpec(
         id="COUNTER",
         name="反制符",
         category="REACTIVE",
-        description="取消一次针对自己的摄物术；反制链深度固定为 1，不可反制反制。",
+        # 文案以用户提供的参考前端原型为准（docs/CARD_RULES_DELTA.md §2.3）。
+        description="反制一次指向你的法术，令其效果转向施术者。",
         asset="counter",
     ),
 )

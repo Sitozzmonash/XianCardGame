@@ -25,7 +25,7 @@ from _game_test_utils import legacy_repr_key  # noqa: E402
 
 from game.actions import Action, ActionKind  # noqa: E402
 from game.config import GameConfig  # noqa: E402
-from game.cards import Card  # noqa: E402
+from game.cards import CARD_TO_INDEX, Card  # noqa: E402
 from game.state import GameState, Phase  # noqa: E402
 
 #: §1.5 规定的 13 段编码
@@ -151,6 +151,52 @@ def test_infoset_reorder_private_only_for_owner():
     assert owner_key[1] == 2  # REORDER -> 2
     assert len(owner_key[8]) == len(state.reorder_view) == 3  # 私有视图进 key
     assert other_key[8] == ()  # 其他人看不到
+
+
+def test_infoset_shape_unchanged_after_card_rule_delta():
+    """卡牌规则改动**没有新增 Phase 枚举值** → 已训模型的 phase 序号（0..4）保持不变。
+
+    变化只有「进入 REORDER 的触发牌多了观星术」与「COUNTER 多了一个反应选项」，
+    两者都不改变 `infoset_key()` 的结构（动作空间本来就不进 key）。
+    """
+    from game.state import PHASE_ORDER, PHASE_TO_INDEX
+
+    assert [p.name for p in PHASE_ORDER] == [
+        "ACTION",
+        "COUNTER",
+        "REORDER",
+        "REINSERT",
+        "ENDED",
+    ]
+    assert PHASE_TO_INDEX[Phase.ACTION] == 0
+    assert PHASE_TO_INDEX[Phase.COUNTER] == 1
+    assert PHASE_TO_INDEX[Phase.REORDER] == 2
+    assert PHASE_TO_INDEX[Phase.REINSERT] == 3
+    assert PHASE_TO_INDEX[Phase.ENDED] == 4
+
+    # 观星术 → REORDER：owner 的 key 与逆天改命同形（phase=2 + reorder_private）
+    state = _fresh(seed=11)
+    owner = state.current_player
+    state.hands[owner] = [Card.PEEK]
+    state.step(Action(ActionKind.PLAY_PEEK))
+    key = state.infoset_key(owner)
+    assert len(key) == EXPECTED_LEN
+    assert key[1] == 2
+    assert len(key[8]) == len(state.reorder_view) == 3
+    assert key[7] == tuple(CARD_TO_INDEX[c] for c in state.known_top[owner])
+    assert state.infoset_key((owner + 1) % 3)[8] == ()
+
+    # COUNTER 阶段：phase=1 + 真实 pending；多一条遁术反应选项不改变 key 结构
+    state2 = _fresh(seed=8)
+    p = state2.current_player
+    target = (p + 1) % 3
+    state2.hands[p] = [Card.STEAL]
+    state2.hands[target] = [Card.SKIP]
+    state2.step(Action(ActionKind.PLAY_STEAL, target=target))
+    target_key = state2.infoset_key(target)
+    assert len(target_key) == EXPECTED_LEN
+    assert target_key[1] == 1
+    assert target_key[12] == (p, target)
 
 
 # ------------------------------------------------------------ 一致性 / 可哈希

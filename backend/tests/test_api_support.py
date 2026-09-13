@@ -54,19 +54,22 @@ PLAYER_PUBLIC_KEYS = {
 LEGAL_ACTION_KEYS = {"id", "type", "label", "enabled", "card_instance_id", "params"}
 
 #: 事件类型全集（§13）
+#: `TURN_SKIPPED` 保留（历史日志兼容，主动遁术移除后不再产生）；
+#: `ESCAPE_DODGED` 为新增（遁术避开法术，见 docs/CARD_RULES_DELTA.md §2.2）。
 EVENT_TYPES = {
     "GAME_STARTED", "TURN_STARTED", "CARD_PLAYED", "CARD_DRAWN", "CARD_STOLEN",
     "COUNTER_OPENED", "COUNTER_USED", "COUNTER_PASSED", "DECK_PEEKED",
-    "DECK_REORDERED", "DECK_SHUFFLED", "TURN_SKIPPED", "TRIBULATION_DRAWN",
-    "TRIBULATION_DEFUSED", "TRIBULATION_REINSERTED", "PLAYER_ELIMINATED",
-    "TURN_ENDED", "GAME_ENDED",
+    "DECK_REORDERED", "DECK_SHUFFLED", "TURN_SKIPPED", "ESCAPE_DODGED",
+    "TRIBULATION_DRAWN", "TRIBULATION_DEFUSED", "TRIBULATION_REINSERTED",
+    "PLAYER_ELIMINATED", "TURN_ENDED", "GAME_ENDED",
 }
 
-#: 4 种特殊决策（API_CONTRACT §12）对应的 action type 分组
+#: 特殊决策（API_CONTRACT §12）对应的 action type 分组
+#: 12.3 反制窗口现在有三个选项：不反制 / 反制符（反弹） / 遁术（避开并结束结算）
 SPECIAL_ACTION_GROUPS = {
-    "COUNTER": {"COUNTER", "PASS_COUNTER"},          # 12.3 反制决策
+    "COUNTER": {"COUNTER", "PASS_COUNTER", "ESCAPE"},  # 12.3 反制 / 遁术决策
     "PLAY_CARD_TARGET": {"PLAY_CARD_TARGET"},        # 12.2 摄物术选目标
-    "REORDER_TOP": {"REORDER_TOP"},                  # 12.4 逆天改命排序
+    "REORDER_TOP": {"REORDER_TOP"},                  # 12.4 逆天改命 / 观星术排序
     "REINSERT_TRIBULATION": {"REINSERT_TRIBULATION"},  # 12.5 天劫回插
 }
 
@@ -74,10 +77,11 @@ SPECIAL_ACTION_GROUPS = {
 ACTION_PRIORITY = {
     "PASS_COUNTER": 0,
     "COUNTER": 1,
-    "REORDER_TOP": 2,
-    "REINSERT_TRIBULATION": 3,
-    "PLAY_CARD_TARGET": 4,
-    "PLAY_CARD": 5,
+    "ESCAPE": 2,
+    "REORDER_TOP": 3,
+    "REINSERT_TRIBULATION": 4,
+    "PLAY_CARD_TARGET": 5,
+    "PLAY_CARD": 6,
     "END_ACTION": 9,
 }
 
@@ -233,7 +237,7 @@ def play_game(
 
 
 def special_groups_hit(specials) -> set:
-    """把命中的 action type 归并到 4 种特殊决策分组。"""
+    """把命中的 action type 归并到特殊决策分组（反制窗口含 COUNTER / PASS_COUNTER / ESCAPE）。"""
     hit = set()
     for group, types in SPECIAL_ACTION_GROUPS.items():
         if specials & types:
