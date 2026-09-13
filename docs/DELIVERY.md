@@ -16,9 +16,16 @@
 
 ```text
 backend/     FastAPI 服务层 + 游戏引擎 + 4 种 AI + 训练/评测 CLI（纯 CPU，无深度学习依赖）
-frontend/    Expo SDK 57 + React Native + TypeScript（8 个路由 + 4 个特殊决策弹窗）
-docs/        交接文档 + 冻结契约 + 设计规格 + 运行手册 + 审计报告 + 本文档
+             ├── Dockerfile / .dockerignore   容器镜像（python:3.11-slim + uvicorn，非 root + 健康检查）
+             └── render.yaml                  Render Blueprint（原生 Python 运行时，开箱可用）
+frontend/    Expo SDK 57 + React Native + TypeScript（10 个路由 + 4 个卡牌交互弹窗 + 2 个辅助弹窗）
+             ├── Dockerfile / nginx.conf / .dockerignore   两阶段构建（node 打包 → nginx 托管静态产物）
+docker-compose.yml   一键起全栈（api:8000 / web:8080），模型只读挂载、健康依赖
+docs/        交接文档 + 冻结契约 + 设计规格 + 运行手册（含 §8 Docker 部署）+ 审计报告 + 交付说明
+             └── FRONTEND_PORT_REPORT.md      前端重做交付报告（2026-09-13）
 scripts/     一键验收 accept.sh + 静态产物 clean-URL 服务 serve_dist.py
+             + compare_screens.py（与参考基准图并排比对 + 量化像素差）
+             + probe_rule_windows.py（直连 API 抓特殊决策窗口，规则生效的硬证据）
 reference/   原始 Python Demo（只读，作为算法参考实现）
 images/      视觉参考图 + 用户提供的 5 屏设计稿（2x 原图）
 ```

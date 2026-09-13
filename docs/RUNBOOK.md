@@ -259,3 +259,82 @@ npx expo export --platform web --output-dir dist
 
 **在阶段 D→E 之前，建议先解决命中率问题**（状态抽象 / 相似信息集 / Hybrid 先验+搜索），
 否则加大迭代数只能扩大表体积，实战命中率仍然很低。
+
+---
+
+## 8. Docker 部署（本机已实测通过）
+
+适合自托管 / Fly / Railway / 任意支持 Docker 的平台；Render 也可把 `render.yaml` 换成 Docker 运行时。
+
+### 8.1 文件
+
+| 文件 | 作用 |
+|---|---|
+| `backend/Dockerfile` | python:3.11-slim + uvicorn；非 root 运行；自带健康检查（用 Python 标准库，slim 里没有 curl） |
+| `backend/.dockerignore` | 排除 `.venv/`、`__pycache__/`、`tests/`、`logs/`、**`models/*.pkl`**（模型不进镜像） |
+| `frontend/Dockerfile` | 两阶段：node:22-alpine 里 `npm ci` + `expo export` → nginx:alpine 托管静态产物 |
+| `frontend/nginx.conf` | clean URL + **嵌套路由** + **真实 404** + 静态资源长缓存 + gzip |
+| `frontend/.dockerignore` | 排除 `node_modules/`、`dist*/`、`.expo/` |
+| `docker-compose.yml` | 两个服务（api:8000 / web:8080）、健康依赖、模型只读挂载 |
+
+### 8.2 一条命令
+
+```bash
+cd D:/Documents/Hermes/xiuxian-card
+docker compose up -d --build      # 构建并启动
+docker compose ps                 # 看健康状态
+docker compose logs -f api        # 跟后端日志
+docker compose down               # 停止
+```
+
+打开：**http://localhost:8080**（前端）· http://localhost:8000/api/v1/health（后端）
+
+### 8.3 两个必须知道的点
+
+1. **前端镜像里的 API 地址是构建期注入的**。`EXPO_PUBLIC_*` 由 Metro 在打包时替换，**改容器环境变量无效**，
+   换地址必须重新 build：
+   ```bash
+   EXPO_PUBLIC_API_BASE_URL=https://api.example.com/api/v1 docker compose up -d --build web
+   ```
+   判据：产物 bundle 里能否 grep 到该地址。
+2. **MCCFR 模型不进镜像**（2 人 10K ≈ 23 MB、3 人 10K ≈ 51 MB，加 checkpoint 上百 MB，且不在 git 里），
+   由 compose 以**只读 bind mount** 挂载 `./backend/models:/app/models`：
+   训练完把 `.pkl` 放进 `backend/models/` 再 `docker compose restart api` 即可，**无需重建镜像**。
+   没有模型时后端照常启动，`GET /agents` 的 mccfr 条目退化为无模型条目（INTERFACES 附录 A3）。
+
+### 8.4 本机实测记录（2026-09-13）
+
+```text
+docker compose build                     → 两个镜像 Built，EXIT=0
+docker compose ps                        → api Up (healthy) 0.0.0.0:8000->8000
+                                           web Up (healthy) 0.0.0.0:8080->80
+GET :8000/api/v1/health                  → {"status":"ok","version":"0.1.0"}
+GET :8000/api/v1/cards                   → 8 张牌
+GET :8000/api/v1/agents                  → 8 个 agent（含挂载来的 5 个 mccfr，带 players/iterations）
+容器内 /app/models                       → 挂载生效（index.json + *.pkl 可见）
+通过容器 API 打完整三局（3 人，含 MCCFR 座位，seed 42/7/99）
+                                         → 11 / 20 / 12 步，均正常终局并有赢家
+容器里出现过的阶段                        → ACTION（含观星术/逆天改命/摄物术，**无遁术**）
+                                           REORDER_TOP「调整顶部牌序」
+                                           REINSERT_TRIBULATION（4 个回插区域）
+                                           COUNTER「不反制 / 使用反制符 / 使用遁术（避开并结束结算）」
+前端 :8080 路由                          → / /setup /battle /cards /ai-lab /result 全 200
+                                           /card/TRIBULATION、/card/STARGAZING 全 200（嵌套路由 OK）
+                                           /nope、/card/NOT_A_CARD → 404（与 Netlify 行为一致）
+产物注入的后端地址                        → bundle 里 grep 到 localhost:8000/api/v1
+浏览器实操                                → /setup?players=2&seed=6 读到容器后端模型清单，
+                                           开局后按 seed 复现出反制窗口
+```
+
+### 8.5 与 Render Blueprint 的关系
+
+`backend/render.yaml` 仍是**原生 Python 运行时**（`pip install` + `uvicorn`），开箱可用、构建更快。
+想用 Docker 上 Render 时把该服务改成：
+
+```yaml
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+```
+
+前端静态托管（Netlify）不需要 Docker（`expo export` 产物直接部署即可，见仓库根 `netlify.toml`）。
