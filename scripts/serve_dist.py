@@ -29,6 +29,10 @@ NOT_FOUND = "+not-found.html"
 
 class CleanUrlHandler(http.server.SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
+        # ⚠️ 要显式区分「命中真实路由」与「回落到 404 页」：SimpleHTTPRequestHandler 会因为
+        #    `+not-found.html` 文件存在而回 200，那样本地预览就会比线上（Netlify 回 404）
+        #    宽松，未知路径的真实表现验不出来。用 `_force_404` 把状态码改回 404。
+        self._force_404 = False
         path = path.split("?", 1)[0].split("#", 1)[0]
         path = posixpath.normpath(path)
         parts = [p for p in path.split("/") if p and p not in (os.curdir, os.pardir)]
@@ -54,7 +58,15 @@ class CleanUrlHandler(http.server.SimpleHTTPRequestHandler):
         if os.path.isfile(candidate):
             return candidate
 
+        if parts != [NOT_FOUND.removesuffix(".html")]:
+            self._force_404 = True
         return os.path.join(self.directory, NOT_FOUND)
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        if getattr(self, "_force_404", False):
+            self._force_404 = False
+            code = 404
+        super().send_response(code, message)
 
     def end_headers(self) -> None:
         # 静态资源禁用缓存，避免改完产物浏览器仍用旧的
