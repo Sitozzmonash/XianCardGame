@@ -4,6 +4,11 @@
  *  1) GET /cards 不可用（后端未就绪 / 网络失败）时 cards 页仍有内容；
  *  2) 手牌只给 card_id 时补中文名。
  * 后端返回的 cards 优先，本表仅在缺失时使用。
+ *
+ * ⚠️ **权威是后端 `game/cards.py` 的 `CARD_SPECS`（`GET /cards` 直接喂前端）**。
+ *    本表是它的离线镜像，规则一改就必须同步更新——否则「后端不可达」时页面会展示旧规则文案
+ *    （曾发生：遁术已改为反应牌，本表仍写「主动 · 结束当前行动，跳过本次抽牌」）。
+ *    同步检查：`curl -s http://127.0.0.1:8000/api/v1/cards` 与下表逐条比对 description/category。
  */
 import type { CardId, CardSpec } from '@/types/card';
 
@@ -12,56 +17,56 @@ export const CARD_SPECS_FALLBACK: CardSpec[] = [
     id: 'TRIBULATION',
     name: '天劫',
     category: 'TRIBULATION',
-    description: '抽到天劫时，若手中无护劫符则立即淘汰，退出本局。',
+    description: '抽到后必须渡劫；手中没有护劫符则立即淘汰。天劫不进入手牌。',
     asset: 'tribulation',
   },
   {
     id: 'DEFUSE',
     name: '护劫符',
     category: 'DEFUSE',
-    description: '抵挡一次天劫；化解后须把天劫回插牌堆（顶 / 近顶 / 中 / 底）。',
+    description: '自动化解一次天劫，并把天劫秘密回插到牌堆的指定区域。',
     asset: 'defuse',
   },
   {
     id: 'STARGAZING',
     name: '观星术',
     category: 'ACTIVE',
-    description: '查看牌堆顶部最多 3 张牌，只有自己知道内容。',
+    description: '查看牌堆顶部最多 3 张牌，并重新调整顺序。',
     asset: 'stargazing',
   },
   {
     id: 'REWRITE_FATE',
     name: '逆天改命',
     category: 'ACTIVE',
-    description: '查看牌堆顶若干张并重新排列其顺序。',
+    description: '查看牌堆顶部最多 3 张牌，并重新调整它们的顺序，只有自己知道最终排序。',
     asset: 'rewrite_fate',
   },
   {
     id: 'SHUFFLE',
     name: '扰乱天机',
     category: 'ACTIVE',
-    description: '洗牌，清除所有玩家已掌握的牌顶信息。',
+    description: '重新洗牌，所有玩家此前获得的牌顶知识全部失效。',
     asset: 'shuffle',
   },
   {
     id: 'ESCAPE',
     name: '遁术',
-    category: 'ACTIVE',
-    description: '结束当前行动，跳过本次抽牌。',
+    category: 'REACTIVE',
+    description: '避开一次指向你的法术，并立即结束当前结算。',
     asset: 'escape',
   },
   {
     id: 'STEAL',
     name: '摄物术',
     category: 'ACTIVE',
-    description: '随机夺取一名其他玩家的一张手牌。',
+    description: '指定另一名存活玩家，随机偷取对方 1 张手牌；目标可以使用反制符反弹或遁术避开。',
     asset: 'steal',
   },
   {
     id: 'COUNTER',
     name: '反制符',
     category: 'REACTIVE',
-    description: '在他人对你使用主动牌时打出，使该效果无效。',
+    description: '反制一次指向你的法术，令其效果转向施术者。',
     asset: 'counter',
   },
 ];
@@ -102,12 +107,14 @@ export const REGION_HINTS: Record<string, string> = {
 };
 
 /** 牌类中文名的**唯一来源**（card-detail/card-visuals.ts 直接复用本表）。
- *  DEFUSE 用「护劫符」（= 后端真实牌名 / CARD_SPECS_FALLBACK 的 name），不是「护劫」。 */
+ *  DEFUSE 用「护劫符」（= 后端真实牌名 / CARD_SPECS_FALLBACK 的 name），不是「护劫」。
+ *  REACTIVE 用「防御」：新规则下反制符与遁术都是反应牌，与参考原型的筛选项一致
+ *  （旧值「反制」在遁术归入 REACTIVE 后就不再准确了）。 */
 export const CATEGORY_LABELS: Record<string, string> = {
   TRIBULATION: '天劫',
   DEFUSE: '护劫符',
   ACTIVE: '主动',
-  REACTIVE: '反制',
+  REACTIVE: '防御',
 };
 
 /** 供 UI 画卡面纹样：每张牌一个字符 */

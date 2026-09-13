@@ -15,13 +15,16 @@ export type Phase = 'ACTION' | 'COUNTER' | 'REORDER' | 'REINSERT' | 'ENDED';
 
 export type GameStatus = 'playing' | 'ended' | 'aborted' | string;
 
-/** legal_actions[].type */
+/** legal_actions[].type
+ *  `ESCAPE` 是**规则改动新增**的反应动作（INTERFACES A13）：新规则下遁术只能在反制窗口打出，
+ *  与 `COUNTER` / `PASS_COUNTER` 并列出现在同一窗口（旧规则里遁术是行动阶段的 `PLAY_CARD`）。 */
 export type ActionType =
   | 'END_ACTION'
   | 'PLAY_CARD'
   | 'PLAY_CARD_TARGET'
   | 'COUNTER'
   | 'PASS_COUNTER'
+  | 'ESCAPE'
   | 'REORDER_TOP'
   | 'REINSERT_TRIBULATION';
 
