@@ -9,18 +9,31 @@
  * （详见下面的 ev()）。隐藏信息纪律也照抄后端：`CARD_STOLEN` 不给被偷的牌、
  * `CARD_DRAWN` 不给牌面、`DECK_REORDERED` 不给排序结果。
  *
+ * 三条卡牌规则按用户裁决镜像真后端（`docs/INTERFACES.md` 附录 A13、`docs/CARD_RULES_DELTA.md`）：
+ *  ① **观星术 = 查看 + 改序**：`CARD_PLAYED`(STARGAZING) → `DECK_PEEKED`（牌面私有）→
+ *     打出后进入 `Phase.REORDER`（复用 `private_1..k` token）→ 提交 `REORDER_TOP` 后 `DECK_REORDERED`。
+ *     与【逆天改命】是同一条决策（后者同样补发 `DECK_PEEKED`，见 `game/state.py:_step_action`）。
+ *  ② **遁术 = 反制窗口的反应牌**：行动阶段不再出现；反制窗口与「不反制 / 使用反制符」并列，
+ *     `legal_actions[].type === 'ESCAPE'`。效果 = 该法术完全无效 + 立即结束本次结算
+ *     （施术者 `TURN_ENDED` 推进、**不抽牌**）→ 事件 `CARD_PLAYED`(ESCAPE) + `ESCAPE_DODGED`。
+ *  ③ **反制符 = 反弹**：原目标反偷原施术者 1 张（`COUNTER_USED.data.redirected=true` / `stolen`；
+ *     真偷到时补 `CARD_STOLEN`(`redirected=true`, `actor`=反弹方, `data.target`=原施术者)）。
+ *  `TURN_SKIPPED`（旧「遁术跳过自己抽牌」）**保留枚举但不再产生**；新增 `ESCAPE_DODGED`。
+ *  `legal_actions` 的 type / label / params 逐字对齐后端 `game/state.py:legal_action_dicts()`
+ *  与 `game/actions.py:ACTION_LABELS`。
+ *
  * 它不是规则引擎，而是**脚本化演示局**：
  *  - 决策点顺序、AI 行为、牌堆内容都由下面的脚本决定；
- *  - 但牌堆顶的抽取、观星结果、逆天改命排序、天劫回插后的顺序都是**真实作用于**这份牌堆的；
- *  - 覆盖 4 种特殊 Phase：COUNTER（反制）/ REORDER（逆天改命排序）/ REINSERT（天劫回插）/ ENDED。
+ *  - 但牌堆顶的抽取、观星结果、改序排序、天劫回插后的顺序都是**真实作用于**这份牌堆的；
+ *  - 覆盖 4 种特殊 Phase：COUNTER（反制窗口）/ REORDER（查看 + 改序）/ REINSERT（天劫回插）/ ENDED。
  *
  * 演示动线（viewer 恒为 0）：
- *  T1 真人回合 → 任意出牌（观星/改命/遁术/摄物术）→ 结束行动并抽牌
- *    → AI 洗牌（known_top 清空）+ AI 摄物术指向真人 → **COUNTER 阶段**（CounterDialog）
- *  → 反制/不反制 → T2 .. T4 真人回合
- *    → 真人在第 4 次抽牌抽到【天劫】 → 有【护劫符】则化解 → **REINSERT 阶段**（ReinsertTribulationDialog）
- *    → 回插后继续 → 再结束一次行动 → 其余玩家陆续被淘汰 → **GAME_ENDED**（Result 页）
- *  任意时刻出【逆天改命】→ **REORDER 阶段**（ReorderTopDialog，拖拽排序 token）
+ *  T1 真人回合 → 出【观星术】/【逆天改命】（→ REORDER，拖拽排序 token）或【摄物术】→ 结束行动并抽牌
+ *    → AI 洗牌（known_top 清空）+ 最后一个 AI 的摄物术指向真人 → **COUNTER 阶段**（CounterModal）
+ *  → 反制窗口三选一：不反制 / 使用反制符（反弹）/ 使用遁术（避开并结束结算）
+ *  → T2 真人回合 → 再遇一次反制窗口（同一局内「遁术避开」与「反制符反弹」两条路线都能稳定演示）
+ *  → T2 .. T4 真人回合 → 第 4 次抽牌抽到【天劫】 → 有【护劫符】则化解 → **REINSERT 阶段**
+ *  → 回插后继续 → 再结束一次行动 → 其余玩家陆续被淘汰 → **GAME_ENDED**（Result 页）
  */
 
 import { ApiError } from './client';
@@ -48,16 +61,42 @@ import type {
   ReinsertRegion,
   SubmitActionRequest,
 } from '@/types/game';
-import { CARD_SPECS_FALLBACK, REGION_LABELS, cardNameOf } from '@/utils/card-catalog';
+import { CARD_SPECS_FALLBACK, cardNameOf } from '@/utils/card-catalog';
 
 const MOCK_LATENCY_MS = 240;
 const MOCK_VERSION = 'mock-0.1.0';
 const MAX_ACTIONS_PER_TURN = 2;
 
+/**
+ * 会开出反制窗口的真人回合（T1 / T2）。
+ * 两个窗口是为了让脚本局一局之内就能稳定演示反制窗口的全部三条路线
+ * （不反制 / 反制符反弹 / 遁术避开）——单一窗口时选了遁术就看不到反弹。
+ */
+const COUNTER_WINDOW_TURNS: readonly number[] = [1, 2];
+
 const PLAYER_NAMES = ['青岚道友', '玄墨真人', '清月仙子', '玄机子', '赤霄君', '素心娘子'];
 const DEFAULT_AGENT_TYPES = ['human', 'rule', 'ismcts', 'random', 'rule', 'random'];
 
 const REGIONS: readonly ReinsertRegion[] = ['TOP', 'NEAR_TOP', 'MIDDLE', 'BOTTOM'];
+
+/**
+ * 反制窗口的中文 label —— 逐字镜像真后端 `backend/game/actions.py:ACTION_LABELS`
+ * （`ActionKind.PASS_COUNTER` / `PLAY_COUNTER` / `PLAY_SKIP`，INTERFACES A13）。
+ * 前端 CounterModal 直接渲染 `legal_actions[].label`。
+ */
+const COUNTER_LABELS = {
+  pass: '不反制',
+  counter: '使用反制符',
+  escape: '使用遁术（避开并结束结算）',
+} as const;
+
+/** 天劫回插区域 label —— 逐字镜像真后端 `game/actions.py:REINSERT_REGION_LABELS`。 */
+const REINSERT_LABELS: Record<ReinsertRegion, string> = {
+  TOP: '牌堆顶',
+  NEAR_TOP: '靠近顶部',
+  MIDDLE: '牌堆中部',
+  BOTTOM: '牌堆底部',
+};
 
 /** 牌堆：前 4 张是「真人抽牌脚本」，其余为填充（AI 从牌堆底抽，互不干扰） */
 const HUMAN_DRAW_SCRIPT: CardId[] = ['STARGAZING', 'DEFUSE', 'ESCAPE', 'TRIBULATION'];
@@ -148,8 +187,10 @@ class MockSession {
   alive: boolean[] = [];
   aiHandCounts: number[] = [];
 
-  private counterDemoUsed = false;
+  /** 已经开过反制窗口的真人回合号（见 COUNTER_WINDOW_TURNS） */
+  private openedCounterWindows: number[] = [];
   private tribulationResolved = false;
+  /** 反制窗口里的施术者（对应真后端 `state.pending_actor`） */
   private pendingStealer: number | null = null;
   private stealPoolCursor = 0;
 
@@ -236,6 +277,7 @@ class MockSession {
       known_top: this.knownTop,
       actions_used: this.actionsUsed,
       max_actions_per_turn: MAX_ACTIONS_PER_TURN,
+      // 真后端只在 REORDER 决策点下发 private_context；观星术与逆天改命共用（INTERFACES A13 ①）
       private_context: this.node === 'reorder' && this.privateTokens.length > 0
         ? { cards: this.privateTokens }
         : null,
@@ -274,29 +316,7 @@ class MockSession {
     // 非自己决策时，前端不应得到任何可点动作（真后端同样只给决策者的动作）
     if (this.decisionPlayer !== 0) return [];
 
-    if (this.node === 'counter') {
-      const actions: LegalAction[] = [];
-      const counterIndex = this.hand.indexOf('COUNTER');
-      if (counterIndex >= 0) {
-        actions.push({
-          id: 'a_mock_counter_use',
-          type: 'COUNTER',
-          label: '使用反制符',
-          enabled: true,
-          card_instance_id: `h_0_${counterIndex}`,
-          params: null,
-        });
-      }
-      actions.push({
-        id: 'a_mock_counter_pass',
-        type: 'PASS_COUNTER',
-        label: counterIndex >= 0 ? '不反制，任其夺取' : '手中无反制符，只能承受',
-        enabled: true,
-        card_instance_id: null,
-        params: null,
-      });
-      return actions;
-    }
+    if (this.node === 'counter') return this.counterWindowActions();
 
     if (this.node === 'reorder') {
       const tokens = this.privateTokens.map((token) => token.token);
@@ -304,7 +324,8 @@ class MockSession {
         {
           id: 'a_mock_reorder_top',
           type: 'REORDER_TOP',
-          label: '逆天改命：按你的顺序放回牌堆顶',
+          // 逐字镜像后端 ACTION_LABELS[REORDER_TOP]：观星术与逆天改命共用同一条动作，故 label 不含牌名
+          label: '调整顶部牌序',
           enabled: true,
           card_instance_id: null,
           params: { order: { type: 'token_order', options: tokens } },
@@ -316,7 +337,7 @@ class MockSession {
       return REGIONS.map((region) => ({
         id: `a_mock_reinsert_${region.toLowerCase()}`,
         type: 'REINSERT_TRIBULATION' as const,
-        label: `回插：${REGION_LABELS[region]}`,
+        label: `回插：${REINSERT_LABELS[region]}`,
         enabled: true,
         card_instance_id: null,
         params: { region: { type: 'enum' as const, options: [region] } },
@@ -327,8 +348,56 @@ class MockSession {
   }
 
   /**
+   * 反制窗口的合法动作 —— 镜像真后端 `game/state.py:legal_actions()` 的 `Phase.COUNTER` 分支
+   * （顺序与 label 逐字一致，INTERFACES A13 / docs/CARD_RULES_DELTA.md §2.2）：
+   *   1) `PASS_COUNTER` 不反制（恒有）       → `COUNTER_PASSED` + 施术者得手（`CARD_STOLEN` 形状不变）
+   *   2) `COUNTER`      使用反制符（有则给） → 反弹：`COUNTER_USED.redirected=true`(+ 真偷到时 `CARD_STOLEN.redirected`)
+   *   3) `ESCAPE`       使用遁术（有则给）   → `ESCAPE_DODGED`：法术完全无效 + 施术者回合立即结束（不抽牌）
+   * 注意：遁术**只在这里**出现，行动阶段不再给（旧规则是 `PLAY_CARD`）。
+   */
+  private counterWindowActions(): LegalAction[] {
+    const actions: LegalAction[] = [
+      {
+        id: 'a_mock_counter_pass',
+        type: 'PASS_COUNTER',
+        label: COUNTER_LABELS.pass,
+        enabled: true,
+        card_instance_id: null,
+        params: null,
+      },
+    ];
+
+    const counterIndex = this.hand.indexOf('COUNTER');
+    if (counterIndex >= 0) {
+      actions.push({
+        id: 'a_mock_counter_use',
+        type: 'COUNTER',
+        label: COUNTER_LABELS.counter,
+        enabled: true,
+        card_instance_id: `h_0_${counterIndex}`,
+        params: null,
+      });
+    }
+
+    const escapeIndex = this.hand.indexOf('ESCAPE');
+    if (escapeIndex >= 0) {
+      actions.push({
+        id: 'a_mock_counter_escape',
+        type: 'ESCAPE',
+        label: COUNTER_LABELS.escape,
+        enabled: true,
+        card_instance_id: `h_0_${escapeIndex}`,
+        params: null,
+      });
+    }
+
+    return actions;
+  }
+
+  /**
    * ACTION 阶段的动作完全由「当前手牌」推导（mock 即规则权威）。
-   * 注意：护劫符 / 反制符 / 天劫 不会出现在这里 —— 前端因此把它们渲染成不可用。
+   * 注意：护劫符 / 反制符 / 天劫 / **遁术** 不会出现在这里 —— 前端因此把它们渲染成不可用。
+   * 遁术从行动阶段牌改成反制窗口的反应牌（INTERFACES A13 ②），见 `game/state.py:304` 的同款注释。
    */
   private handDerivedActions(): LegalAction[] {
     const actions: LegalAction[] = [];
@@ -356,18 +425,11 @@ class MockSession {
             params: null,
           });
           break;
-        case 'ESCAPE':
-          actions.push({
-            id: `a_mock_escape_${index}`,
-            type: 'PLAY_CARD',
-            label: '使用遁术',
-            enabled: true,
-            card_instance_id: instanceId,
-            params: null,
-          });
-          break;
         case 'STEAL': {
-          const targets = this.otherPlayers().filter((player) => this.alive[player]);
+          // 真后端只在目标**手里有牌**时给摄物术（`state.py:legal_actions()`）
+          const targets = this.otherPlayers().filter(
+            (player) => this.alive[player] && this.aiHandCounts[player] > 0,
+          );
           targets.forEach((target) => {
             actions.push({
               id: `a_mock_steal_${index}_${target}`,
@@ -409,6 +471,8 @@ class MockSession {
         return this.handlePlayCardTarget(action, payload);
       case 'COUNTER':
         return this.handleCounter(action);
+      case 'ESCAPE':
+        return this.handleEscape(action);
       case 'PASS_COUNTER':
         return this.handlePassCounter();
       case 'REORDER_TOP':
@@ -424,7 +488,7 @@ class MockSession {
     if (this.tribulationResolved) {
       return this.finale();
     }
-    return this.endHumanTurn(true);
+    return this.endHumanTurn();
   }
 
   private handlePlayCard(action: LegalAction): Draft[] {
@@ -437,43 +501,52 @@ class MockSession {
     ];
 
     switch (cardId) {
-      case 'STARGAZING': {
-        this.consumeCard(action.card_instance_id);
-        const revealed = this.deck.slice(0, 3);
-        this.knownTop = revealed.map((card, position) => ({
-          position,
-          card_id: card,
-          name: cardNameOf(card),
-        }));
-        // 公开事件只报张数；牌面属于私有信息（真后端只对观星者本人合并 private cards）
-        drafts.push(ev('DECK_PEEKED', 0, { count: revealed.length }));
-        break;
-      }
+      case 'STARGAZING':
       case 'REWRITE_FATE': {
+        // 新规则（INTERFACES A13 ①）：观星术 = 查看 + 改序，与逆天改命共用同一条 REORDER 决策。
         this.consumeCard(action.card_instance_id);
-        const revealed = this.deck.slice(0, 3);
-        this.privateTokens = revealed.map((card, index) => ({
-          token: `private_${index + 1}`,
-          card_id: card,
-          name: cardNameOf(card),
-        }));
-        this.node = 'reorder';
-        this.phase = 'REORDER';
-        this.decisionPlayer = 0;
-        this.currentPlayer = 0;
-        break;
+        this.beginReorder();
+        this.actionsUsed += 1;
+        // 公开事件只报张数；牌面是私有信息 —— viewer（0）就是看牌的人本人，
+        // 真后端 render_event 只在 private_for === viewer 时把 private_data.cards[] 合并进来
+        // （`app/services/events.py:120-140`）。
+        drafts.push(
+          ev('DECK_PEEKED', 0, {
+            count: this.privateTokens.length,
+            cards: this.privateTokens,
+          }),
+        );
+        return drafts;
       }
-      case 'ESCAPE': {
-        this.consumeCard(action.card_instance_id);
-        // 遁术：跳过本次抽牌直接结束行动
-        return [...drafts, ...this.endHumanTurn(false, true)];
-      }
+      case 'ESCAPE':
+        // 遁术已改为反制窗口的反应牌，行动阶段打出一律非法
+        // （真后端 `game/state.py:372-374` 直接 RuntimeError）。
+        throw new ApiError(
+          409,
+          'INVALID_ACTION',
+          '【遁术】只能在反制窗口作为反应牌使用（反制窗口的 legal_actions 里 type="ESCAPE"）。',
+        );
       default:
         throw new ApiError(400, 'INVALID_ACTION', `mock 不支持打出 ${cardId}。`);
     }
+  }
 
-    this.actionsUsed += 1;
-    return drafts;
+  /**
+   * 观星术 / 逆天改命 共用的「查看 + 改序」入口：揭示牌堆顶 ≤3 张并进入 REORDER 决策。
+   * 私有 token 固定为 `private_1..private_k`（真后端 `state.reorder_tokens()`，绝不暴露真实 deck index）。
+   */
+  private beginReorder(): void {
+    const revealed = this.deck.slice(0, Math.min(3, this.deck.length));
+    this.knownTop = this.knownTopOf(revealed);
+    this.privateTokens = revealed.map((card, index) => ({
+      token: `private_${index + 1}`,
+      card_id: card,
+      name: cardNameOf(card),
+    }));
+    this.node = 'reorder';
+    this.phase = 'REORDER';
+    this.decisionPlayer = 0;
+    this.currentPlayer = 0;
   }
 
   private handlePlayCardTarget(action: LegalAction, payload: ActionPayload): Draft[] {
@@ -501,26 +574,110 @@ class MockSession {
     return drafts;
   }
 
+  /**
+   * 反制符 = **反弹**（INTERFACES A13 ③ / API_CONTRACT §13）：
+   * `CARD_PLAYED`(COUNTER) → `COUNTER_USED`(`redirected=true`, `stolen=bool`)
+   * →〔真偷到牌时〕`CARD_STOLEN`(`actor`=反弹方即真人 0，`data.target`=被反偷的原施术者，
+   * `data.redirected=true`，**不回传牌面**)。
+   */
   private handleCounter(action: LegalAction): Draft[] {
+    const caster = this.requireCaster();
     const index = parseHandIndex(action.card_instance_id) ?? this.hand.indexOf('COUNTER');
-    if (index < 0 || this.hand[index] !== 'COUNTER') {
+    if (index < 0 || index >= this.hand.length || this.hand[index] !== 'COUNTER') {
       throw new ApiError(400, 'INVALID_PAYLOAD', '手中没有反制符。');
     }
     this.hand.splice(index, 1);
     this.discard.push('COUNTER');
 
-    const drafts: Draft[] = [ev('COUNTER_USED', 0)];
-    return this.resolveCounterOutcome(drafts);
+    const drafts: Draft[] = [
+      ev('CARD_PLAYED', 0, { card_id: 'COUNTER', name: cardNameOf('COUNTER') }),
+    ];
+    // stolen = 反弹方（真人）手牌是否真的 +1（真后端：`before.hand_sizes[caster] > len(state.hands[caster])`）
+    const stolen = this.stealFromAi(caster);
+    if (stolen) this.hand.push(stolen);
+    drafts.push(ev('COUNTER_USED', 0, { redirected: true, stolen: stolen !== null }));
+    if (stolen) {
+      drafts.push(ev('CARD_STOLEN', 0, { target: caster, redirected: true }));
+    }
+    return this.resolveCounterWindow(drafts, true);
+  }
+
+  /**
+   * 遁术（反制窗口的反应牌，INTERFACES A13 ②）：
+   * 法术完全无效 + 立即结束本次结算 —— 事件 = `CARD_PLAYED`(ESCAPE) → `ESCAPE_DODGED`
+   * （`actor`=遁术者，`data.target`=施术者，`data.card_id`/`name`=被避开的法术）
+   * → `TURN_ENDED`(`actor`=施术者) → 下一家 `TURN_STARTED`。
+   * **不再发 `TURN_SKIPPED`**（旧「遁术跳过自己抽牌」的遗留事件，A13 起不再产生）。
+   */
+  private handleEscape(action: LegalAction): Draft[] {
+    const caster = this.requireCaster();
+    const index = parseHandIndex(action.card_instance_id) ?? this.hand.indexOf('ESCAPE');
+    if (index < 0 || index >= this.hand.length || this.hand[index] !== 'ESCAPE') {
+      throw new ApiError(400, 'INVALID_PAYLOAD', '手中没有遁术。');
+    }
+    this.hand.splice(index, 1);
+    this.discard.push('ESCAPE');
+
+    return this.resolveCounterWindow(
+      [
+        ev('CARD_PLAYED', 0, { card_id: 'ESCAPE', name: cardNameOf('ESCAPE') }),
+        ev('ESCAPE_DODGED', 0, {
+          target: caster,
+          card_id: 'STEAL',
+          name: cardNameOf('STEAL'),
+        }),
+      ],
+      false,
+    );
   }
 
   private handlePassCounter(): Draft[] {
+    const caster = this.requireCaster();
     const drafts: Draft[] = [ev('COUNTER_PASSED', 0)];
     const lost = this.stealFromHuman();
     if (lost) {
       // actor = 偷的人，被偷的人放 data.target；被偷的牌面不下发
-      drafts.push(ev('CARD_STOLEN', this.pendingStealer, { target: 0 }));
+      // 形状与旧规则一致（**无 redirected 键**，测试会卡这一点）
+      drafts.push(ev('CARD_STOLEN', caster, { target: 0 }));
     }
-    return this.resolveCounterOutcome(drafts);
+    return this.resolveCounterWindow(drafts, true);
+  }
+
+  /**
+   * 反制窗口结算（三条路线共用）：
+   *  - `casterKeepsTurn = true`（不反制 / 反制符）：法术照常落地，**施术者的回合继续**
+   *    （真后端 `_step_counter` 把 `current_player` 设回施术者、`phase=ACTION`），
+   *    mock 的脚本就是在这时补完这位 AI 被中断的「抽牌 + 结束回合」；
+   *  - `casterKeepsTurn = false`（遁术）：法术完全无效 + 立即结束本次结算 → 施术者**不抽牌**，
+   *    回合直接结束（真后端 `_advance_turn_from`）。
+   * 两种情况下都接着把回合交给真人（脚本化：mock 只支持真人做决策）。
+   */
+  private resolveCounterWindow(drafts: Draft[], casterKeepsTurn: boolean): Draft[] {
+    if (casterKeepsTurn && this.pendingStealer !== null) {
+      const drawn = this.drawFor(this.pendingStealer, true);
+      if (drawn) {
+        drafts.push(
+          ev('CARD_DRAWN', this.pendingStealer, {
+            hand_count: this.aiHandCounts[this.pendingStealer],
+          }),
+        );
+      }
+    }
+    if (this.pendingStealer !== null) {
+      drafts.push(ev('TURN_ENDED', this.pendingStealer));
+    }
+    this.pendingStealer = null;
+    this.startHumanTurn();
+    drafts.push(ev('TURN_STARTED', 0, { turn_no: this.turnNo }));
+    return drafts;
+  }
+
+  /** 反制窗口里的施术者（真后端 `state.pending_actor`） */
+  private requireCaster(): number {
+    if (this.pendingStealer === null) {
+      throw new ApiError(409, 'INVALID_ACTION', '当前不在反制窗口，没有待结算的法术。');
+    }
+    return this.pendingStealer;
   }
 
   private handleReorderTop(action: LegalAction, payload: ActionPayload): Draft[] {
@@ -540,11 +697,8 @@ class MockSession {
     const tokenToCard = new Map(this.privateTokens.map((token) => [token.token, token.card_id]));
     const reordered = (order as string[]).map((token) => tokenToCard.get(token) as CardId);
     this.deck = [...reordered, ...this.deck.slice(reordered.length)];
-    this.knownTop = reordered.map((card, position) => ({
-      position,
-      card_id: card,
-      name: cardNameOf(card),
-    }));
+    // 排序者本人知道新的牌顶（真后端 `_step_reorder`：`known_top[owner] = deck[:k]`）
+    this.knownTop = this.knownTopOf(reordered);
     this.privateTokens = [];
     this.node = 'action';
     this.phase = 'ACTION';
@@ -574,25 +728,36 @@ class MockSession {
 
     return [
       ev('TRIBULATION_REINSERTED', 0, { region: region as EventRegion }),
+      // 回插提交后回合才真正推进 —— 真后端在这里发 TURN_ENDED（实测 seq 23/24）：
+      // TRIBULATION_REINSERTED → TURN_ENDED(本人) → TURN_STARTED(下一位)
+      ev('TURN_ENDED', 0),
       ev('TURN_STARTED', 0, { turn_no: this.turnNo }),
     ];
   }
 
   // ---------------------------------------------------------------- 回合推进
 
-  private endHumanTurn(draw: boolean, skipped = false): Draft[] {
+  /** 真人结束行动：**总是抽牌**（旧规则里「遁术跳过抽牌」的分支已随 A13 删除） */
+  private endHumanTurn(): Draft[] {
     const drafts: Draft[] = [];
-    if (skipped) drafts.push(ev('TURN_SKIPPED', 0));
-    drafts.push(ev('TURN_ENDED', 0));
 
-    if (draw) {
-      const drawn = this.drawFor(0);
-      // 抽牌事件只报手牌数，牌面仅本人可见（真后端 CARD_DRAWN = { hand_count }）
-      if (drawn) drafts.push(ev('CARD_DRAWN', 0, { hand_count: this.hand.length }));
-      if (drawn === 'TRIBULATION') {
-        return [...drafts, ...this.resolveTribulation()];
-      }
+    const drawn = this.drawFor(0);
+    if (drawn === 'TRIBULATION') {
+      // ⚠️ 事件顺序与形状必须与真后端逐条一致（实测 seq 20/21/22）：
+      //    TRIBULATION_DRAWN → TRIBULATION_DEFUSED | PLAYER_ELIMINATED
+      //    且抽到天劫时**不发 CARD_DRAWN**（后端用 TRIBULATION_DRAWN 代替它）。
+      //    此处也**不发 TURN_ENDED**：真后端在化解这一步 `turn_no` 未变、`current_player` 仍是本人
+      //    （phase=REINSERT_TRIBULATION），回合真正推进发生在提交回插位置之后，由 handleReinsert 补发。
+      drafts.push(...this.resolveTribulation());
+      return drafts;
     }
+    if (drawn) {
+      // 抽牌事件只报手牌数，牌面仅本人可见（真后端 CARD_DRAWN = { hand_count }）
+      drafts.push(ev('CARD_DRAWN', 0, { hand_count: this.hand.length }));
+    }
+    // ⚠️ 真后端顺序是 CARD_DRAWN → TURN_ENDED（实测 seq 9/10）。反过来写会让战斗日志与
+    //    事件动画的顺序在「mock 演示」与「真后端」之间漂移，属于最容易被忽略的那类不一致。
+    drafts.push(ev('TURN_ENDED', 0));
 
     const others = this.otherPlayers().filter((player) => this.alive[player]);
     let stealer: number | null = null;
@@ -610,15 +775,20 @@ class MockSession {
         this.shuffleBottomHalfForDemo();
       }
 
-      // 最后一个对手用摄物术指向真人 → 触发反制决策（演示 CounterDialog）
+      // 最后一个对手用摄物术指向真人 → 触发反制窗口（CounterModal 的三条路线）
       const isLast = position === others.length - 1;
-      if (this.turnNo === 1 && !this.counterDemoUsed && isLast && this.hand.length > 0) {
+      const windowOpen =
+        COUNTER_WINDOW_TURNS.includes(this.turnNo) &&
+        !this.openedCounterWindows.includes(this.turnNo) &&
+        isLast &&
+        this.hand.length > 0;
+      if (windowOpen) {
         drafts.push(
           ev('CARD_PLAYED', player, { card_id: 'STEAL', name: cardNameOf('STEAL') }),
         );
         // actor = 偷的人；data.target = 需要决定是否反制的那位（被偷的人）
         drafts.push(ev('COUNTER_OPENED', player, { target: 0 }));
-        this.counterDemoUsed = true;
+        this.openedCounterWindows.push(this.turnNo);
         this.pendingStealer = player;
         this.node = 'counter';
         this.phase = 'COUNTER';
@@ -635,16 +805,6 @@ class MockSession {
 
     if (stealer !== null) return drafts;
 
-    this.startHumanTurn();
-    drafts.push(ev('TURN_STARTED', 0, { turn_no: this.turnNo }));
-    return drafts;
-  }
-
-  private resolveCounterOutcome(drafts: Draft[]): Draft[] {
-    if (this.pendingStealer !== null) {
-      drafts.push(ev('TURN_ENDED', this.pendingStealer));
-    }
-    this.pendingStealer = null;
     this.startHumanTurn();
     drafts.push(ev('TURN_STARTED', 0, { turn_no: this.turnNo }));
     return drafts;
@@ -739,6 +899,15 @@ class MockSession {
     const [card] = this.hand.splice(index, 1);
     this.discard.push(card);
     return card;
+  }
+
+  /** 牌顶知识 → `observation.known_top`（`position` = 牌顶位置序号，不是 deck index） */
+  private knownTopOf(cards: CardId[]): KnownTopCard[] {
+    return cards.map((card, position) => ({
+      position,
+      card_id: card,
+      name: cardNameOf(card),
+    }));
   }
 
   /** 真人抽牌：从牌堆顶取（脚本前 4 张即人类抽牌脚本） */

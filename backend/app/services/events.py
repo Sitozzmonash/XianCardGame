@@ -244,7 +244,12 @@ def synthesize_events(
                     {"hand_count": len(state.hands[actor])},
                 )
             )
-        events.append(_event(EventKind.TURN_ENDED.value, actor, {}))
+        # ⚠️ 化解成功时**不能**在这里发 TURN_ENDED：实测此刻 `turn_no` 未变、`current_player`
+        #    仍是本人（`phase=REINSERT_TRIBULATION`），回合真正推进发生在玩家提交回插位置之后
+        #    （`TRIBULATION_REINSERTED` 那一步）。在这里发会让同一回合出现**两条** TURN_ENDED
+        #    （前端日志显示两次「结束回合」）。回插分支（上方 REINSERT）已负责补发。
+        if not defused:
+            events.append(_event(EventKind.TURN_ENDED.value, actor, {}))
 
     # ------------------------------------------------------------- 淘汰 / 终局
     for seat, was_alive in enumerate(before.alive):
