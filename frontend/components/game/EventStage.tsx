@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { GameEvent } from '@/types/event'
 import type { GameView } from '@/types/game'
+import { visualCard } from '@/lib/game-data'
+import { cardIdForEvent } from '@/utils/event-card'
 import { presentEvent } from '@/utils/event-log'
 import { playerNameOf } from '@/utils/legal-actions'
 
@@ -23,19 +25,21 @@ export function EventStage({ event, view, pace, paused, onPace, onPaused, onNext
   onSkipAll: () => void
 }) {
   const presentation = useMemo(() => event ? presentEvent(event, (id) => playerNameOf(view, id)) : null, [event, view])
+  const eventCardId = event ? cardIdForEvent(event) : undefined
+  const eventCard = useMemo(() => eventCardId ? visualCard(eventCardId) : undefined, [eventCardId])
   const [progressKey, setProgressKey] = useState(0)
 
   useEffect(() => {
     if (!event || !presentation || paused) return
     setProgressKey((value) => value + 1)
-    const duration = Math.max(1900, presentation.durationMs * 1.65) * SPEED[pace]
+    const duration = Math.max(eventCard ? 3600 : 1900, presentation.durationMs * 1.65) * SPEED[pace]
     const timer = window.setTimeout(onNext, duration)
     return () => window.clearTimeout(timer)
   }, [event, pace, paused, presentation, onNext])
 
   if (!event || !presentation) return null
   const effect = event.type.includes('TRIBULATION') ? 'thunder' : event.type.includes('PEEK') || event.type.includes('REORDER') ? 'stars' : event.type.includes('SHUFFLE') ? 'ripple' : presentation.impact ? 'impact' : 'soft'
-  const duration = Math.max(1900, presentation.durationMs * 1.65) * SPEED[pace]
+  const duration = Math.max(eventCard ? 3600 : 1900, presentation.durationMs * 1.65) * SPEED[pace]
 
   return (
     <div className={cn('event-stage', `event-${effect}`)} role="status" aria-live="polite">
@@ -45,6 +49,17 @@ export function EventStage({ event, view, pace, paused, onPace, onPaused, onNext
         <p className="event-kicker">第 {event.seq} 则 · 天机流转</p>
         <h2>{presentation.title}</h2>
         <p>{presentation.detail}</p>
+        {eventCard && (
+          <article className="event-card-explainer" aria-label={`${eventCard.name} 的卡牌说明`}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={eventCard.art} alt="" />
+            <div>
+              <small>这张牌的作用</small>
+              <strong>【{eventCard.name}】</strong>
+              <span>{eventCard.effect}</span>
+            </div>
+          </article>
+        )}
       </div>
       <div className="event-controls">
         <div className="pace-switch" aria-label="演出速度">

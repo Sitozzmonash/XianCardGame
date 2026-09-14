@@ -3,6 +3,7 @@ import path from 'node:path'
 
 const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const outputDir = process.argv[2]
+const baseUrl = process.env.VISUAL_CHECK_URL ?? 'http://127.0.0.1:3000'
 if (!outputDir) throw new Error('Usage: node scripts/visual-check.mjs <output-dir>')
 
 const browser = await chromium.launch({ executablePath: edge, headless: true })
@@ -28,7 +29,7 @@ async function audit(page, label) {
 const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 })
 mobile.on('console', (message) => { if (message.type() === 'error') errors.push(`console: ${message.text()}`) })
 mobile.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`))
-await mobile.goto('http://127.0.0.1:3000', { waitUntil: 'networkidle' })
+await mobile.goto(baseUrl, { waitUntil: 'networkidle' })
 await mobile.screenshot({ path: path.join(outputDir, 'xian-home-mobile.png'), fullPage: true })
 await audit(mobile, 'mobile-home')
 
@@ -42,8 +43,14 @@ await mobile.screenshot({ path: path.join(outputDir, 'xian-event-mobile.png'), f
 await audit(mobile, 'mobile-event')
 await mobile.getByRole('button', { name: '全部跳过' }).click()
 await mobile.getByRole('button', { name: '观星术' }).click()
+await mobile.getByRole('dialog').waitFor()
+await mobile.screenshot({ path: path.join(outputDir, 'xian-card-detail-mobile.png'), fullPage: true })
+await audit(mobile, 'mobile-card-detail')
+await mobile.getByRole('button', { name: '我知道了' }).click()
 await mobile.getByRole('button', { name: '使用卡牌' }).click()
 await mobile.locator('.event-stage').waitFor()
+await mobile.screenshot({ path: path.join(outputDir, 'xian-card-played-mobile.png'), fullPage: true })
+await audit(mobile, 'mobile-card-played')
 await mobile.getByRole('button', { name: '全部跳过' }).click()
 await mobile.getByRole('heading', { name: /观星术·牌顶定序/ }).waitFor()
 await mobile.waitForTimeout(700)
@@ -53,7 +60,7 @@ await audit(mobile, 'mobile-stargazing')
 const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 })
 desktop.on('console', (message) => { if (message.type() === 'error') errors.push(`desktop console: ${message.text()}`) })
 desktop.on('pageerror', (error) => errors.push(`desktop pageerror: ${error.message}`))
-await desktop.goto('http://127.0.0.1:3000', { waitUntil: 'networkidle' })
+await desktop.goto(baseUrl, { waitUntil: 'networkidle' })
 await desktop.screenshot({ path: path.join(outputDir, 'xian-home-desktop.png'), fullPage: true })
 await audit(desktop, 'desktop-home')
 
