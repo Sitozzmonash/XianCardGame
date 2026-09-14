@@ -6,9 +6,7 @@ __pycache__/
 .pytest_cache/
 .env
 
-# MCCFR 模型体积大（2 人 10K ≈ 23MB、3 人 10K ≈ 51MB，加 checkpoint 上百 MB），
-# 且本来就不进 git —— 不烘进镜像，运行时用 -v 挂载（见 Dockerfile 顶部说明）。
-models/*.pkl
+# `models/` 中登记的两个轻量 Web 推理模型随镜像部署。
 
 # 运行/训练产物与临时探针
 logs/

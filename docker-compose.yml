@@ -1,18 +1,17 @@
 # 修仙卡牌 · 本地/自托管一键编排（Docker Compose）
 #
 # 用法：
-#     docker compose up -d --build        # 构建并启动（后端 :8000 + 前端 :8080）
+#     docker compose up -d --build        # 构建并启动后端 :8000
 #     docker compose ps                   # 看健康状态
 #     docker compose logs -f api          # 跟日志
 #     docker compose down                 # 停止
 #
-# 打开：http://localhost:8080 （前端）· http://localhost:8000/api/v1/health （后端）
+# 前端改为 Next.js：另开终端进入 frontend 后执行 npm run dev。
+# 打开：http://localhost:3000 · http://localhost:8000/api/v1/health
 #
 # ⚠️ 两个必须知道的点：
-# 1. **前端镜像里的 API 地址是构建期注入的**（`EXPO_PUBLIC_*` 由 Metro 在打包时替换）。
-#    换地址要重新 build：`EXPO_PUBLIC_API_BASE_URL=https://api.example.com/api/v1 docker compose up -d --build web`
-# 2. **MCCFR 模型不进镜像**（体积大且不在 git 里），用 bind mount 挂载；
-#    没有模型时后端照常启动，`GET /agents` 的 mccfr 条目退化（INTERFACES 附录 A3）。
+# 1. Vercel 前端使用构建期变量 `NEXT_PUBLIC_API_BASE_URL` 指向 Render 后端。
+# 2. 镜像自带 2/3 人轻量 MCCFR 推理模型；本地训练的更大模型仍可通过 bind mount 覆盖。
 
 name: xiuxian-card
 
@@ -27,7 +26,7 @@ services:
       - "8000:8000"
     environment:
       APP_ENV: production
-      # 生产部署请改成前端实际域名，例如 "https://xiuxian-card.netlify.app"
+      # 生产部署请改成 Vercel 前端实际域名
       CORS_ORIGINS: "*"
       DEFAULT_ISMCTS_SIMULATIONS: "500"
       ISMCTS_MAX_SIMULATIONS: "2000"
@@ -36,22 +35,6 @@ services:
       MAX_SESSIONS: "200"
       MAX_DECISIONS: "500"
     volumes:
-      # MCCFR 模型（*.pkl，不在 git 里）：挂载宿主目录，训练完放进去即可，无需重建镜像
+      # 可选：用宿主目录覆盖镜像内的轻量模型，无需重建镜像
       - ./backend/models:/app/models:ro
-    restart: unless-stopped
-
-  web:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        # 构建期注入 —— 浏览器从宿主访问端口映射，所以用 localhost 而不是服务名 api
-        EXPO_PUBLIC_API_BASE_URL: ${EXPO_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
-    image: xiuxian-card-web:local
-    container_name: xiuxian-card-web
-    ports:
-      - "8080:80"
-    depends_on:
-      api:
-        condition: service_healthy
     restart: unless-stopped

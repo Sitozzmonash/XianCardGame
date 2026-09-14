@@ -1,5 +1,7 @@
 # 运行手册（RUNBOOK）
 
+> **2026-09-13 更新：**前端已迁移到 Next.js 16，不再使用 Expo/Netlify。当前的前端运行与部署说明以 `frontend/README.md` 和 `docs/NEXTJS_MIGRATION.md` 为准；本文后半部分的 Expo 命令仅保留作历史记录。
+
 面向使用者的中文操作手册。所有命令在 **Windows git-bash** 下验证过；路径一律用 `D:/...` 正斜杠风格。
 脚本与接口的权威定义见 `docs/INTERFACES.md`，算法语义见 `docs/xiuxian_card_ai_project_spec.md`。
 
@@ -16,7 +18,7 @@ python -m venv .venv
 # 前端（Node 20+）
 cd D:/Documents/Hermes/xiuxian-card/frontend
 npm install
-cp .env.example .env      # 改 EXPO_PUBLIC_API_BASE_URL 指向后端
+cp .env.example .env.local      # 改 NEXT_PUBLIC_API_BASE_URL 指向后端
 ```
 
 下文用 `PY` 代指 `D:/Documents/Hermes/xiuxian-card/backend/.venv/Scripts/python.exe`，所有后端命令都先
@@ -35,11 +37,11 @@ cp .env.example .env      # 改 EXPO_PUBLIC_API_BASE_URL 指向后端
 
 # ③ 起服务 + 前端
 "$PY" main.py serve --port 8000          # http://localhost:8000/docs
-cd ../frontend && npm start              # 按 w 开 Web，或用 Expo Go 扫码
+cd ../frontend && npm run dev            # http://localhost:3000
 ```
 
 前端默认连真后端；后端不可用时首页会提示，并提供「使用演示数据」按钮（运行期切到 mock，无需重新构建）。
-想强制 mock：`EXPO_PUBLIC_USE_MOCK=1`。
+想强制 mock：`NEXT_PUBLIC_USE_MOCK=1`。
 
 ---
 

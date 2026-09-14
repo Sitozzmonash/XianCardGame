@@ -26,7 +26,7 @@ xiuxian-card/
 │   ├── app/                    # 【C4 负责】FastAPI 服务层
 │   ├── models/                 # .pkl 模型（不进 git，除 index.json）
 │   └── tests/                  # 各 Agent 自带测试；跨模块测试由主控 Agent 写
-├── frontend/                   # 【C1 负责】Expo + React Native + TypeScript
+├── frontend/                   # 【C1 负责】Next.js + React + TypeScript（Vercel）
 ├── docs/                       # 只读：原始交接文档
 ├── images/                     # 只读：视觉参考图
 └── reference/xiuxian_ai_demo/  # 只读：原始 Python Demo（不要再改）

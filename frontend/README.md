@@ -1,56 +1,35 @@
-# Welcome to your Expo app 👋
+# XianCardGame Web
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Next.js 16 前端，面向 Vercel 部署。FastAPI 后端是唯一规则权威；前端只渲染 `GameView`、播放 `events` 并提交 `legal_actions`。
 
-## Get started
+## 本地运行
 
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```powershell
+Copy-Item .env.example .env.local
+npm install
+npm run dev
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+默认访问 `http://localhost:8000/api/v1`。先在 `backend/` 启动 FastAPI，再打开 `http://localhost:3000`。
 
-### Other setup steps
+## 验证
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+```powershell
+npm run typecheck
+npm test
+npm run build
+```
 
-## Learn more
+## Vercel
 
-To learn more about developing your project with Expo, look at the following resources:
+1. 导入 GitHub 仓库，将 Root Directory 设置为 `frontend`。
+2. 添加 `NEXT_PUBLIC_API_BASE_URL=https://<render-service>.onrender.com/api/v1`。
+3. 保持 Framework Preset 为 Next.js，部署。
+4. 在 Render 的 `CORS_ORIGINS` 中填写 Vercel 正式域名；如需 Preview 域名可暂时用 `*`。
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+`NEXT_PUBLIC_*` 会在构建时写入浏览器包，修改后必须重新部署。
 
-## Join the community
+## AI
 
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- ISMCTS：配置界面可选择搜索次数，提交 `{type:"ismcts", simulations:...}`。
+- MCCFR：从后端 `GET /agents` 读取与当前人数匹配的模型，提交模型注册表 `id`。模型文件不应由浏览器路径指定；Render 必须能在 `MODEL_DIR` 找到对应 `.pkl`。

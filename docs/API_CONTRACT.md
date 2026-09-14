@@ -2,7 +2,7 @@
 
 # 1. 原则
 
-本文件是 Expo 与 FastAPI 的接口契约。
+本文件是 Next.js 与 FastAPI 的接口契约。
 
 游戏规则仍以已有项目规范和 Python Game Engine 为准。
 
@@ -31,10 +31,10 @@ http://localhost:8000/api/v1
 https://<render-service>.onrender.com/api/v1
 ```
 
-Expo 环境变量：
+Next.js 浏览器环境变量：
 
 ```text
-EXPO_PUBLIC_API_BASE_URL=
+NEXT_PUBLIC_API_BASE_URL=
 ```
 
 ---

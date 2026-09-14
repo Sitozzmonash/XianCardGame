@@ -13,7 +13,7 @@
 - 开发顺序：[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md)
 
 ```text
-frontend/  Expo + React Native + TypeScript（渲染 + 输入）
+frontend/  Next.js + React + TypeScript（Vercel；渲染 + 输入）
 backend/   FastAPI（唯一规则权威）+ 游戏引擎 + AI + 训练/评测 CLI
 reference/ 原始 Python Demo（只读，作为算法参考实现）
 docs/      交接文档与冻结契约
@@ -27,7 +27,7 @@ images/    视觉参考图
 | 组件 | 版本 |
 |---|---|
 | Python | 3.11+（后端与 AI，**纯 CPU，无深度学习依赖**） |
-| Node.js | 20+（前端 Expo） |
+| Node.js | 20+（前端 Next.js） |
 | 平台 | Windows / macOS / Linux 均可；本仓库在 Windows + git-bash 下开发验证 |
 
 后端只依赖标准库 + FastAPI 系列，MCCFR 训练不需要 GPU、不需要 PyTorch。
@@ -48,7 +48,7 @@ python -m venv .venv
 ```bash
 cd frontend
 npm install
-cp .env.example .env      # 修改 EXPO_PUBLIC_API_BASE_URL 指向后端
+cp .env.example .env.local      # 修改 NEXT_PUBLIC_API_BASE_URL 指向后端
 ```
 
 ---
@@ -81,10 +81,10 @@ python main.py serve --host 0.0.0.0 --port 8000 --reload
 
 # 终端 2：前端
 cd frontend
-npm start            # Expo Dev Server；按 w 打开 Web，或用 Expo Go 扫码
+npm run dev          # Next.js Dev Server：http://localhost:3000
 ```
 
-前端在没有后端时可用 mock 数据渲染全部页面（`EXPO_PUBLIC_USE_MOCK=1`）。
+前端在没有后端时可用 mock 数据渲染全部页面（`NEXT_PUBLIC_USE_MOCK=1`）。
 
 ---
 
@@ -208,8 +208,8 @@ backend/models/
 
 ## 9. 部署
 
-- 后端：Render Web Service（`backend/render.yaml` 已含启动命令、健康检查与全部环境变量）
-- 前端：Expo（Expo Go 真机 / EAS Build / Web 导出）
+- 前端：Vercel（项目 Root Directory 设置为 `frontend`）
+- 后端：Render Docker（仓库根 `render.yaml`）
 
 Render 上**不做训练**：训练在本地完成 → benchmark → 把确认的 `.pkl` 放进 `backend/models/` → 部署。
 

@@ -1,22 +1,18 @@
-# Render 部署配置：后端 FastAPI 服务
-# 用法：Render Dashboard → New → Blueprint → 选择本仓库（rootDir 已在下方指定）
+# Render Blueprint（控制台将 Blueprint 路径设为 backend/render.yaml 时使用）
 services:
   - type: web
     name: xiuxian-card-api
-    runtime: python
+    runtime: docker
     plan: free
-    rootDir: backend
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /api/v1/health
     autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.11
       - key: APP_ENV
         value: production
       - key: CORS_ORIGINS
-        value: "*"
+        sync: false
       - key: DEFAULT_ISMCTS_SIMULATIONS
         value: "500"
       - key: ISMCTS_MAX_SIMULATIONS
