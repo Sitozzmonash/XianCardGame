@@ -14,9 +14,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from enum import Enum
 from typing import Any, Mapping, Optional
 
 from game import Action, ActionKind, GameConfig, GameState, PHASE_API_NAME, Phase
+from game.cards import Card
 
 from ..core.config import Settings, get_settings
 from ..core.errors import GameEnded, InvalidAction, StaleRevision
@@ -29,6 +31,32 @@ log = logging.getLogger("app.services.game_session")
 #: `status` 取值（API_CONTRACT §7）
 STATUS_PLAYING = "playing"
 STATUS_ENDED = "ended"
+
+
+def _json_value(value: Any) -> Any:
+    """把 session 中的有限运行时值转换成 JSON 基元。
+
+    PostgreSQL session 存储只接受这类快照；不要用 pickle 持久化会话，避免
+    将可执行反序列化载荷写进外部数据库。
+    """
+    if isinstance(value, Enum):
+        return value.value
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    raise TypeError(f"session 快照不支持 {type(value).__name__}")
+
+
+def _tuple_tree(value: Any) -> Any:
+    """`random.Random.setstate()` 需要 tuple；JSON 解码后递归还原。"""
+    if isinstance(value, list):
+        return tuple(_tuple_tree(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _tuple_tree(item) for key, item in value.items()}
+    return value
 
 
 class GameSession:
@@ -47,15 +75,19 @@ class GameSession:
         self.game_id = str(game_id)
         self.settings = settings or get_settings()
         self.human_player_id = None if human_player_id is None else int(human_player_id)
+        # 保留可 JSON 化的原始请求，以便跨进程恢复时按同一配置重建 AI。
+        self.agent_specs = _json_value(list(agent_specs))
 
         self.state: GameState = GameState(config, config.seed if seed is None else int(seed))
         self.agents, self.agent_meta = build_seat_agents(
-            agent_specs, int(self.state.init_seed), self.settings
+            self.agent_specs, int(self.state.init_seed), self.settings
         )
 
         self.revision: int = 1
         self.created_at: float = time.time()
-        self.last_active_at: float = time.monotonic()
+        # 用墙钟时间而非 monotonic：该值会写入 PostgreSQL，并可被另一台
+        # Vercel Function 正确解释为 session 的最后活跃时间。
+        self.last_active_at: float = time.time()
         self.destroyed: bool = False
 
         self._lock = threading.RLock()
@@ -91,6 +123,157 @@ class GameSession:
             ]
         )
         self._rebuild_actions()
+
+    # ------------------------------------------------------------- 持久化快照
+
+    def to_snapshot(self) -> dict:
+        """导出 JSON 安全快照，用于无状态运行环境恢复活跃对局。"""
+        with self._lock:
+            state = self.state
+            agent_rng_states = {}
+            for seat, agent in self.agents.items():
+                rng = getattr(agent, "rng", None)
+                if rng is not None and hasattr(rng, "getstate"):
+                    agent_rng_states[str(seat)] = _json_value(rng.getstate())
+
+            return {
+                "format": 1,
+                "game_id": self.game_id,
+                "human_player_id": self.human_player_id,
+                "agent_specs": _json_value(self.agent_specs),
+                "revision": self.revision,
+                "created_at": self.created_at,
+                "last_active_at": self.last_active_at,
+                "events": _json_value(self._events),
+                "seq": self._seq,
+                "event_cursor": self._event_cursor,
+                "ai_steps_total": self.ai_steps_total,
+                "warnings": _json_value(self.warnings),
+                "agent_rng_states": agent_rng_states,
+                "state": {
+                    "config": state.config.to_dict(),
+                    "init_seed": state.init_seed,
+                    "rng_state": _json_value(state.rng.getstate()),
+                    "hands": _json_value(state.hands),
+                    "deck": _json_value(state.deck),
+                    "discard": _json_value(state.discard),
+                    "alive": list(state.alive),
+                    "known_top": _json_value(state.known_top),
+                    "current_player": state.current_player,
+                    "phase": state.phase.value,
+                    "actions_used": state.actions_used,
+                    "turn_no": state.turn_no,
+                    "decision_count": state.decision_count,
+                    "winner": state.winner,
+                    "forced_stop": state.forced_stop,
+                    "pending_actor": state.pending_actor,
+                    "pending_target": state.pending_target,
+                    "reorder_owner": state.reorder_owner,
+                    "reorder_view": _json_value(state.reorder_view),
+                    "reorder_card": _json_value(state.reorder_card),
+                    "reinsert_player": state.reinsert_player,
+                    "logs": _json_value(state.logs),
+                },
+            }
+
+    @classmethod
+    def from_snapshot(
+        cls, payload: Mapping[str, Any], settings: Optional[Settings] = None
+    ) -> "GameSession":
+        """从 `to_snapshot()` 的 JSON 数据恢复完整且可继续推进的会话。"""
+        if not isinstance(payload, Mapping) or int(payload.get("format", 0)) != 1:
+            raise ValueError("不支持的 session 快照格式")
+        raw_state = payload.get("state")
+        raw_specs = payload.get("agent_specs")
+        if not isinstance(raw_state, Mapping) or not isinstance(raw_specs, list):
+            raise ValueError("session 快照缺少 state 或 agent_specs")
+
+        config = GameConfig.from_dict(raw_state.get("config") or {})
+        game_id = str(payload.get("game_id") or "")
+        if not game_id:
+            raise ValueError("session 快照缺少 game_id")
+
+        session = cls(
+            game_id,
+            config=config,
+            seed=int(raw_state.get("init_seed", config.seed)),
+            human_player_id=payload.get("human_player_id"),
+            agent_specs=raw_specs,
+            settings=settings,
+        )
+        state = session.state
+
+        def cards(value: Any) -> list[Card]:
+            if not isinstance(value, list):
+                raise ValueError("session 卡牌快照格式错误")
+            return [Card(str(card)) for card in value]
+
+        try:
+            state.init_seed = int(raw_state["init_seed"])
+            state.rng.setstate(_tuple_tree(raw_state["rng_state"]))
+            state.hands = [cards(hand) for hand in raw_state["hands"]]
+            state.deck = cards(raw_state["deck"])
+            state.discard = cards(raw_state["discard"])
+            state.alive = [bool(item) for item in raw_state["alive"]]
+            state.known_top = [cards(known) for known in raw_state["known_top"]]
+            state.current_player = int(raw_state["current_player"])
+            state.phase = Phase(str(raw_state["phase"]))
+            state.actions_used = int(raw_state["actions_used"])
+            state.turn_no = int(raw_state["turn_no"])
+            state.decision_count = int(raw_state["decision_count"])
+            state.winner = (
+                None if raw_state.get("winner") is None else int(raw_state["winner"])
+            )
+            state.forced_stop = bool(raw_state["forced_stop"])
+            state.pending_actor = (
+                None
+                if raw_state.get("pending_actor") is None
+                else int(raw_state["pending_actor"])
+            )
+            state.pending_target = (
+                None
+                if raw_state.get("pending_target") is None
+                else int(raw_state["pending_target"])
+            )
+            state.reorder_owner = (
+                None
+                if raw_state.get("reorder_owner") is None
+                else int(raw_state["reorder_owner"])
+            )
+            state.reorder_view = cards(raw_state["reorder_view"])
+            state.reorder_card = (
+                None
+                if raw_state.get("reorder_card") is None
+                else Card(str(raw_state["reorder_card"]))
+            )
+            state.reinsert_player = (
+                None
+                if raw_state.get("reinsert_player") is None
+                else int(raw_state["reinsert_player"])
+            )
+            state.logs = [str(item) for item in raw_state["logs"]]
+
+            session.revision = int(payload["revision"])
+            session.created_at = float(payload["created_at"])
+            session.last_active_at = float(payload["last_active_at"])
+            session.destroyed = False
+            session._events = list(payload.get("events") or [])
+            session._seq = int(payload.get("seq", len(session._events)))
+            session._event_cursor = int(payload.get("event_cursor", 0))
+            session.ai_steps_total = int(payload.get("ai_steps_total", 0))
+            session.warnings = [str(item) for item in (payload.get("warnings") or [])]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("session 快照内容损坏") from exc
+
+        raw_rng_states = payload.get("agent_rng_states") or {}
+        if isinstance(raw_rng_states, Mapping):
+            for raw_seat, rng_state in raw_rng_states.items():
+                agent = session.agents.get(int(raw_seat))
+                rng = getattr(agent, "rng", None)
+                if rng is not None and hasattr(rng, "setstate"):
+                    rng.setstate(_tuple_tree(rng_state))
+        session._rebuild_actions()
+        return session
 
     # ------------------------------------------------------------------ 事件流
 
@@ -287,7 +470,7 @@ class GameSession:
         self.revision += 1
         self._emit(synthesize_events(actor, action, before, self.state))
         self._rebuild_actions()
-        self.last_active_at = time.monotonic()
+        self.last_active_at = time.time()
 
     def _ai_action(self, seat: int) -> Optional[Action]:
         legal = self.state.legal_actions()
@@ -409,7 +592,7 @@ class GameSession:
         return self.view_for(viewer)
 
     def idle_seconds(self, now: Optional[float] = None) -> float:
-        return (now if now is not None else time.monotonic()) - self.last_active_at
+        return (now if now is not None else time.time()) - self.last_active_at
 
     def is_expired(self, ttl_seconds: float, now: Optional[float] = None) -> bool:
         return self.idle_seconds(now) > float(ttl_seconds)

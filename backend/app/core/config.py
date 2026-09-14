@@ -90,6 +90,8 @@ class Settings:
 
     model_dir: str = "models"
 
+    # 留空则使用本地进程内 session；Vercel/Neon 部署必须设置此项。
+    database_url: Optional[str] = None
     session_ttl_seconds: float = 3600.0
     max_sessions: int = 200
 
@@ -133,6 +135,7 @@ class Settings:
             ismcts_max_simulations=max(1, _env_int("ISMCTS_MAX_SIMULATIONS", 2000)),
             default_ismcts_exploration=_env_float("ISMCTS_EXPLORATION", 1.4),
             model_dir=_env_str("MODEL_DIR", "models"),
+            database_url=(os.environ.get("DATABASE_URL") or "").strip() or None,
             session_ttl_seconds=max(1.0, _env_float("SESSION_TTL_SECONDS", 3600.0)),
             max_sessions=max(1, _env_int("MAX_SESSIONS", 200)),
             max_decisions=max(1, _env_int("MAX_DECISIONS", 500)),

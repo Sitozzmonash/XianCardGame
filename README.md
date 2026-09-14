@@ -206,12 +206,27 @@ backend/models/
 
 ---
 
-## 9. 部署
+## 9. 部署（Vercel Services + Neon）
 
-- 前端：Vercel（项目 Root Directory 设置为 `frontend`）
-- 后端：Render Docker（仓库根 `render.yaml`）
+仓库根的 `vercel.json` 同时声明两个 Service：`frontend/`（Next.js）和
+`backend/`（FastAPI）。浏览器只访问同域的 `/api/v1/*`，Vercel 将其转给后端，
+因此生产环境的 `NEXT_PUBLIC_API_BASE_URL=/api/v1`。
 
-Render 上**不做训练**：训练在本地完成 → benchmark → 把确认的 `.pkl` 放进 `backend/models/` → 部署。
+1. 在 Vercel 导入仓库后点击 **Refresh**，让界面读取根 `vercel.json`；确认两个
+   Service 和 `/api/v1/(.*) → backend` 路由都已识别，再点 **Deploy**。
+2. 在 backend Service 的 Environment Variables 设置 `DATABASE_URL` 为 Neon 的
+   PostgreSQL URL（仅放 Vercel 加密变量，绝不提交 `.env`）。首次后端请求会自动创建
+   `game_sessions` 表。
+3. 设置生产值：`APP_ENV=production`、`MODEL_DIR=models`、
+   `DEFAULT_ISMCTS_SIMULATIONS=200`、`ISMCTS_MAX_SIMULATIONS=500`、
+   `SESSION_TTL_SECONDS=3600`。
+
+本地可复制 `backend/.env.example` 为 `backend/.env` 后自行填写数据库连接串；留空时
+后端保持进程内 session，适合不连 Neon 的离线开发。Vercel 项目创建后，推送到连接的
+`master` 分支会自动触发新的 Production 部署。
+
+不在 Vercel 上做训练：训练在本地完成 → benchmark → 把确认的 `.pkl` 放进
+`backend/models/` → 部署。两个推理模型继续随仓库部署，因此 ISMCTS 和 MCCFR 都可用。
 
 ---
 

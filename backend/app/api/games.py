@@ -50,10 +50,13 @@ def create_game(request: CreateGameRequest) -> dict:
     session.run_ai_until_human()
 
     viewer = session.human_player_id if session.human_player_id is not None else 0
+    state = session.view_for(viewer)
+    # Vercel / Neon 模式在冷启动前也要持久化 AI 已推进后的最终局面。
+    store.save(session)
     return {
         "game_id": session.game_id,
         "player_id": viewer,
-        "state": session.view_for(viewer),
+        "state": state,
     }
 
 
@@ -70,10 +73,14 @@ def post_action(
     request: ActionRequest, game_id: str = Path(..., min_length=1)
 ) -> dict:
     """执行动作：返回最新 GameView（含本次请求产生的 `events[]`）。"""
-    session = get_session_store().get(game_id)
+    store = get_session_store()
+    session = store.get(game_id)
     if session.human_player_id is None:
         raise BadRequest("该局没有人类座位，无法提交动作")
-    return session.act(request.action_id, request.payload, request.revision)
+    state = session.act(request.action_id, request.payload, request.revision)
+    # expected_revision 把跨 Vercel 实例的同时出牌归一为现有 STALE_REVISION。
+    store.save(session, expected_revision=request.revision)
+    return state
 
 
 @router.delete("/{game_id}")

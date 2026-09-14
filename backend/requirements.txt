@@ -5,6 +5,10 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.7
 PyYAML>=6.0
+python-dotenv>=1.0
+# PostgreSQL session snapshots for Vercel Functions / Neon.  The binary wheel
+# keeps deployment independent of a system libpq installation.
+psycopg[binary]>=3.2
 
 # 测试
 pytest>=8.0

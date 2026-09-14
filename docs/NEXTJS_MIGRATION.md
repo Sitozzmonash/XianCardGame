@@ -6,13 +6,16 @@
 
 ```text
 浏览器 → Vercel / Next.js
-              ↓ REST
-         Render / Docker / FastAPI
+              ↓ /api/v1（同域 rewrite）
+          Vercel / FastAPI
               ↓
-       Game Engine + ISMCTS / MCCFR
+  Neon PostgreSQL session + Game Engine + ISMCTS / MCCFR
 ```
 
-Vercel 项目 Root Directory 是 `frontend`，公开 API 地址使用 `NEXT_PUBLIC_API_BASE_URL`。Render 从仓库根 `render.yaml` 创建 Docker Web Service，健康检查为 `/api/v1/health`。
+仓库根 `vercel.json` 声明 `frontend` 和 `backend` 两个 Services，FastAPI 明确入口为
+`app.main:app`。生产前端使用 `NEXT_PUBLIC_API_BASE_URL=/api/v1`，无需暴露单独后端域名；
+`DATABASE_URL` 仅在 Vercel backend Service 配置。session 以 JSON 快照存入 Neon，故冷启动
+或命中另一 Vercel Function 不会丢局。
 
 ## 交互修复
 
@@ -24,4 +27,4 @@ Vercel 项目 Root Directory 是 `frontend`，公开 API 地址使用 `NEXT_PUBL
 
 ## AI 边界
 
-ISMCTS 和 MCCFR 的实现仍在后端。前端只负责发送配置：ISMCTS 发送搜索次数；MCCFR 从 `/agents` 读取注册模型并发送模型 `id`。MCCFR 模型必须与玩家人数匹配，且对应 `.pkl` 必须实际存在于 Render 的 `MODEL_DIR`。
+ISMCTS 和 MCCFR 的实现仍在后端。前端只负责发送配置：ISMCTS 发送搜索次数；MCCFR 从 `/agents` 读取注册模型并发送模型 `id`。MCCFR 模型必须与玩家人数匹配，且对应 `.pkl` 必须实际存在于 Vercel backend Service 的 `MODEL_DIR`。

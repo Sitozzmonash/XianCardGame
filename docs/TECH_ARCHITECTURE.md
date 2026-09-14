@@ -59,8 +59,9 @@ Uvicorn
 
 ```text
 Expo App
-Backend → Render Web Service
-Database → 无
+Frontend → Vercel Next.js Service
+Backend → Vercel FastAPI Service
+Database → Neon PostgreSQL（活跃 game session JSON 快照）
 ```
 
 ---
@@ -253,7 +254,8 @@ frontend/
 
 # 7. Game Session
 
-V1 不使用数据库，所以游戏 session 保存在 FastAPI 进程内存。
+本地未配置数据库时，游戏 session 保存在 FastAPI 进程内存；Vercel 生产环境配置
+`DATABASE_URL` 后，session 以 JSON 快照写入 Neon PostgreSQL。
 
 示意：
 
@@ -272,7 +274,9 @@ created_at
 last_active_at
 ```
 
-Render 重启后游戏 session 丢失是 V1 可接受行为。
+Vercel Function 冷启动或切换实例后，后端会从 Neon 恢复游戏状态、事件游标和 AI 随机数状态。
+动作保存使用提交前 revision 的乐观并发检查，两个实例同时出牌时第二个请求返回
+`STALE_REVISION`，不会覆盖已经提交的对局。
 
 需要：
 
@@ -370,20 +374,21 @@ max_depth
 
 ---
 
-# 10. Render
+# 10. Vercel Services + Neon
 
 推荐启动：
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port $PORT
+根 vercel.json：frontend → Next.js，backend → app.main:app
 ```
 
 环境变量：
 
 ```text
 APP_ENV=production
-CORS_ORIGINS=...
-DEFAULT_ISMCTS_SIMULATIONS=500
+DATABASE_URL=<Neon PostgreSQL URL，仅 Vercel 加密变量>
+DEFAULT_ISMCTS_SIMULATIONS=200
+ISMCTS_MAX_SIMULATIONS=500
 MODEL_DIR=models
 SESSION_TTL_SECONDS=3600
 ```
@@ -391,8 +396,6 @@ SESSION_TTL_SECONDS=3600
 V1 不放：
 
 ```text
-数据库密码
-Redis
 训练 Worker
 ```
 
@@ -400,7 +403,7 @@ Redis
 
 # 11. 训练与生产服务分离
 
-不要让 Render Web API 做长期 MCCFR 训练。
+不要让 Vercel Web API 做长期 MCCFR 训练。
 
 正确方式：
 
@@ -410,7 +413,7 @@ Redis
 → 保存 .pkl
 → 将确认模型加入 models/
 → deploy
-→ Render 只负责推理
+→ Vercel 只负责推理
 ```
 
 以后真的需要在线训练，再拆独立 Worker。

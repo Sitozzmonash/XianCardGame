@@ -1,8 +1,8 @@
-"""进程内 session 注册表（TECH_ARCHITECTURE §7 / INTERFACES §4.1）。
+"""游戏 session 注册表。
 
-* `sessions: dict[str, GameSession]` 存在进程内存（Render 重启丢局是可接受行为）；
-* 惰性清理：每次创建/获取/列举时顺手回收 TTL 过期与超上限的 session（不起线程）；
-* `SESSION_TTL_SECONDS`（默认 3600）/ `MAX_SESSIONS`（默认 200）来自环境变量。
+本地未设置 `DATABASE_URL` 时，session 保存在进程内存，方便离线开发和
+既有测试；设置 `DATABASE_URL` 后改由 PostgreSQL JSON 快照保存，适配
+Vercel Function 的冷启动与多实例调度。
 """
 
 from __future__ import annotations
@@ -18,19 +18,29 @@ from game import GameConfig
 from ..core.config import Settings, get_settings
 from ..core.errors import GameNotFound
 from .game_session import GameSession
+from .postgres_session_repository import PostgresSessionRepository
 
 log = logging.getLogger("app.services.session_store")
 
 
 class SessionStore:
-    """`game_id -> GameSession` 的进程内注册表。"""
+    """`game_id -> GameSession` 存储门面，按配置选择内存或 PostgreSQL。"""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        repository: Optional[PostgresSessionRepository] = None,
+    ) -> None:
         self.settings = settings or get_settings()
-        self._sessions: dict = {}
+        self._sessions: dict[str, GameSession] = {}
         self._lock = threading.RLock()
+        self._repository = repository
+        if self._repository is None and self.settings.database_url:
+            self._repository = PostgresSessionRepository(self.settings.database_url)
 
-    # ------------------------------------------------------------------ 基础
+    @property
+    def persistent(self) -> bool:
+        return self._repository is not None
 
     @property
     def ttl_seconds(self) -> float:
@@ -41,40 +51,48 @@ class SessionStore:
         return int(self.settings.max_sessions)
 
     def __len__(self) -> int:
+        if self._repository is not None:
+            return self._repository.count()
         with self._lock:
             return len(self._sessions)
 
-    def game_ids(self) -> list:
+    def game_ids(self) -> list[str]:
+        if self._repository is not None:
+            return self._repository.game_ids()
         with self._lock:
             return sorted(self._sessions)
 
     def has(self, game_id: str) -> bool:
+        if self._repository is not None:
+            return self._repository.has(str(game_id))
         with self._lock:
             return str(game_id) in self._sessions
 
     # ------------------------------------------------------------------ 清理
 
     def purge_expired(self, now: Optional[float] = None) -> int:
-        """删除空闲超时 / 已销毁的 session，返回删除数量（惰性清理入口）。"""
-        moment = time.monotonic() if now is None else float(now)
-        removed = 0
-        with self._lock:
-            for game_id, session in list(self._sessions.items()):
-                if session.destroyed or session.is_expired(self.ttl_seconds, moment):
-                    session.destroy()
-                    self._sessions.pop(game_id, None)
-                    removed += 1
+        """删除空闲超时 / 已销毁的 session，返回删除数量。"""
+        if self._repository is not None:
+            removed = self._repository.purge_expired()
+        else:
+            moment = time.time() if now is None else float(now)
+            removed = 0
+            with self._lock:
+                for game_id, session in list(self._sessions.items()):
+                    if session.destroyed or session.is_expired(self.ttl_seconds, moment):
+                        session.destroy()
+                        self._sessions.pop(game_id, None)
+                        removed += 1
         if removed:
             log.info("惰性清理了 %s 个 session（TTL=%ss）", removed, self.ttl_seconds)
         return removed
 
-    def _enforce_capacity(self) -> None:
-        """超过 `MAX_SESSIONS` 时按最近活跃时间淘汰最旧的 session。"""
+    def _enforce_memory_capacity(self) -> None:
         limit = self.max_sessions
         if len(self._sessions) < limit:
             return
         overflow = len(self._sessions) - limit + 1
-        ordered = sorted(self._sessions.items(), key=lambda kv: kv[1].last_active_at)
+        ordered = sorted(self._sessions.items(), key=lambda item: item[1].last_active_at)
         for game_id, session in ordered[:overflow]:
             session.destroy()
             self._sessions.pop(game_id, None)
@@ -91,10 +109,24 @@ class SessionStore:
         agent_specs: list,
         game_id: Optional[str] = None,
     ) -> GameSession:
-        """新建并登记一个 session（自动清理过期 + 容量淘汰）。"""
+        """新建 session；持久模式下先为新局腾出全局容量。"""
         self.purge_expired()
+        if self._repository is not None:
+            self._repository.enforce_capacity(max(0, self.max_sessions - 1))
+            session = GameSession(
+                str(game_id or uuid.uuid4()),
+                config=config,
+                seed=seed,
+                human_player_id=human_player_id,
+                agent_specs=agent_specs,
+                settings=self.settings,
+            )
+            # create 后还会运行 AI；路由会再保存最终快照。
+            self._repository.save(session)
+            return session
+
         with self._lock:
-            self._enforce_capacity()
+            self._enforce_memory_capacity()
             new_id = str(game_id or uuid.uuid4())
             session = GameSession(
                 new_id,
@@ -108,8 +140,14 @@ class SessionStore:
             return session
 
     def get(self, game_id: str) -> GameSession:
-        """取出 session；不存在 / 已过期 → 404 `GAME_NOT_FOUND`。"""
+        """读取可继续推进的 session；持久模式每次读取数据库最新版本。"""
         key = str(game_id)
+        if self._repository is not None:
+            session = self._repository.load(key)
+            if session is None:
+                raise GameNotFound(f"游戏 {key} 不存在或已过期", details={"game_id": key})
+            return session
+
         with self._lock:
             session = self._sessions.get(key)
             if session is None:
@@ -123,9 +161,16 @@ class SessionStore:
                 )
             return session
 
+    def save(self, session: GameSession, *, expected_revision: Optional[int] = None) -> None:
+        """写回已改变的 session；动作传旧 revision 做跨实例并发保护。"""
+        if self._repository is not None:
+            self._repository.save(session, expected_revision=expected_revision)
+
     def delete(self, game_id: str) -> bool:
-        """删除 session（幂等：删除不存在的不报错，由路由决定是否 404）。"""
+        """删除 session（幂等：路由始终返回 `ok: true`）。"""
         key = str(game_id)
+        if self._repository is not None:
+            return self._repository.delete(key)
         with self._lock:
             session = self._sessions.pop(key, None)
         if session is None:
@@ -134,6 +179,9 @@ class SessionStore:
         return True
 
     def clear(self) -> None:
+        if self._repository is not None:
+            self._repository.clear()
+            return
         with self._lock:
             for session in self._sessions.values():
                 session.destroy()
