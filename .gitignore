@@ -11,10 +11,13 @@ backend/.pytest-tmp*/
 htmlcov/
 *.egg-info/
 
-# 模型与训练产物（大文件不进 git；仅放行两个轻量 Web 推理模型）
+# 模型与训练产物（大文件不进 git；仅放行受控的轻量 Web 推理模型）
 *.pkl
 !backend/models/mccfr_2p_web_1k.pkl
 !backend/models/mccfr_3p_web_1k.pkl
+!backend/models/mccfr_4p_web_250.pkl
+!backend/models/mccfr_5p_web_250.pkl
+!backend/models/mccfr_6p_web_250.pkl
 *.bin
 backend/logs/*.jsonl
 # agent / 调试临时文件（本仓约定：以 _ 开头的探针脚本与输出）

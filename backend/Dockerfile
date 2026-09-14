@@ -7,7 +7,7 @@
 #
 # 说明：
 # - 端口用 $PORT（云平台会注入；未设时默认 8000），与 backend/render.yaml 的 startCommand 一致。
-# - 两个轻量 Web MCCFR 推理模型随镜像部署，确保 Render 可直接运行 2 人/3 人 MCCFR。
+# - 轻量 Web MCCFR 推理模型随镜像部署，确保 Render 可直接运行 2–6 人 MCCFR。
 #   更大的训练模型仍建议通过持久磁盘或单独制品提供，不在 Render 上训练。
 # - 健康检查用 Python 标准库（slim 镜像里没有 curl）。
 

@@ -226,7 +226,7 @@ backend/models/
 `master` 分支会自动触发新的 Production 部署。
 
 不在 Vercel 上做训练：训练在本地完成 → benchmark → 把确认的 `.pkl` 放进
-`backend/models/` → 部署。两个推理模型继续随仓库部署，因此 ISMCTS 和 MCCFR 都可用。
+`backend/models/` → 部署。轻量 2–6 人推理模型继续随仓库部署，因此 ISMCTS 和 MCCFR 都可用。
 
 ---
 
